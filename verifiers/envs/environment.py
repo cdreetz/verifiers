@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import time
 from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
@@ -590,6 +591,9 @@ class Environment(ABC):
             metadata=metadata,
         )
 
+        # start timer for execution
+        start_time = time.perf_counter()
+
         # resolve concurrency knobs
         gen_limit = max_concurrent_generation
         score_limit = max_concurrent_scoring
@@ -670,6 +674,18 @@ class Environment(ABC):
                 )
             else:
                 await asyncio.gather(*tasks)
+
+            # update metadata with actual values before returning
+            elapsed_time = (time.perf_counter() - start_time) * 1000  # convert to ms
+            results.metadata.time_ms = elapsed_time
+            if results.reward:
+                results.metadata.avg_reward = sum(results.reward) / len(results.reward)
+            if results.metrics:
+                results.metadata.avg_metrics = {
+                    k: sum(v) / len(v) if v else 0.0
+                    for k, v in results.metrics.items()
+                }
+
             return results
         else:
             # non-interleaved: generate all then score all
@@ -718,6 +734,18 @@ class Environment(ABC):
             else:
                 results.reward = []
                 results.metrics = {}
+
+            # update metadata with actual values before returning
+            elapsed_time = (time.perf_counter() - start_time) * 1000  # convert to ms
+            results.metadata.time_ms = elapsed_time
+            if results.reward:
+                results.metadata.avg_reward = sum(results.reward) / len(results.reward)
+            if results.metrics:
+                results.metadata.avg_metrics = {
+                    k: sum(v) / len(v) if v else 0.0
+                    for k, v in results.metrics.items()
+                }
+
             return results
 
     # alias for backward compatibility
