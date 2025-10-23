@@ -14,7 +14,7 @@ from textual import on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, VerticalScroll
-from textual.screen import ModalScreen, Screen
+from textual.screen import Screen
 from textual.theme import Theme
 from textual.widgets import Footer, Label, OptionList, Static
 from textual.widgets._option_list import Option
@@ -190,172 +190,6 @@ class Panel(Container):
         margin: 1;
     }
     """
-
-
-# ----------------------------
-# Modal Screens
-# ----------------------------
-class ToolsModal(ModalScreen):
-    """Modal screen for displaying tools available during a rollout."""
-
-    BINDINGS = [
-        Binding("escape,q", "dismiss", "Close"),
-    ]
-
-    DEFAULT_CSS = """
-    ToolsModal {
-        align: center middle;
-    }
-
-    ToolsModal > Container {
-        width: 80%;
-        height: 80%;
-        background: $panel;
-        border: thick $primary;
-        padding: 1 2;
-    }
-
-    ToolsModal #tools-content {
-        height: 1fr;
-        scrollbar-color: $secondary;
-        scrollbar-background: $panel;
-    }
-    """
-
-    def __init__(self, tools_data: Optional[List[Dict[str, Any]]]):
-        super().__init__()
-        self.tools_data = tools_data
-
-    def compose(self) -> ComposeResult:
-        with Container():
-            yield Label(Text("Tools Available to Agent", style="bold"), classes="title")
-            yield VerticalScroll(
-                Static(self._format_tools(), id="tools-content", markup=False)
-            )
-            yield Label(Text("Press ESC or Q to close", style="dim"), classes="subtitle")
-
-    def _format_tools(self) -> Text:
-        """Format tools data for display."""
-        if not self.tools_data:
-            return Text("No tools data available", style="dim")
-
-        out = Text()
-        for i, tool in enumerate(self.tools_data):
-            if i > 0:
-                out.append("\n" + "=" * 80 + "\n\n")
-
-            # Tool name
-            tool_name = tool.get("function", {}).get("name", "Unknown")
-            out.append(f"Tool: {tool_name}\n", style="bold")
-
-            # Tool description
-            tool_desc = tool.get("function", {}).get("description", "")
-            if tool_desc:
-                out.append(f"Description: {tool_desc}\n\n")
-
-            # Parameters
-            params = tool.get("function", {}).get("parameters", {})
-            if params:
-                out.append("Parameters:\n", style="bold")
-                try:
-                    params_json = json.dumps(params, indent=2, ensure_ascii=False)
-                    out.append(params_json)
-                except Exception:
-                    out.append(str(params))
-                out.append("\n")
-
-        return out
-
-    def action_dismiss(self) -> None:
-        self.dismiss()
-
-
-class JudgeModal(ModalScreen):
-    """Modal screen for displaying judge rubric results."""
-
-    BINDINGS = [
-        Binding("escape,q", "dismiss", "Close"),
-    ]
-
-    DEFAULT_CSS = """
-    JudgeModal {
-        align: center middle;
-    }
-
-    JudgeModal > Container {
-        width: 80%;
-        height: 80%;
-        background: $panel;
-        border: thick $primary;
-        padding: 1 2;
-    }
-
-    JudgeModal #judge-content {
-        height: 1fr;
-        scrollbar-color: $secondary;
-        scrollbar-background: $panel;
-    }
-    """
-
-    def __init__(self, judge_data: Optional[List[Dict[str, Any]]]):
-        super().__init__()
-        self.judge_data = judge_data
-
-    def compose(self) -> ComposeResult:
-        with Container():
-            yield Label(Text("Judge Rubric Results", style="bold"), classes="title")
-            yield VerticalScroll(
-                Static(self._format_judge_data(), id="judge-content", markup=False)
-            )
-            yield Label(Text("Press ESC or Q to close", style="dim"), classes="subtitle")
-
-    def _format_judge_data(self) -> Text:
-        """Format judge data for display."""
-        if not self.judge_data:
-            return Text("No judge data available for this rollout", style="dim")
-
-        out = Text()
-        for i, judge_call in enumerate(self.judge_data):
-            if i > 0:
-                out.append("\n" + "=" * 80 + "\n\n")
-
-            # Judge model
-            judge_model = judge_call.get("judge_model", "Unknown")
-            out.append(f"Judge Model: {judge_model}\n", style="bold")
-
-            # Question
-            question = judge_call.get("question", "")
-            if question:
-                out.append("\nQuestion:\n", style="bold")
-                out.append(f"{question}\n")
-
-            # Ground truth answer
-            answer = judge_call.get("answer", "")
-            if answer:
-                out.append("\nGround Truth Answer:\n", style="bold")
-                out.append(f"{answer}\n")
-
-            # Parsed response from agent
-            parsed_response = judge_call.get("parsed_response", "")
-            if parsed_response:
-                out.append("\nAgent's Response:\n", style="bold")
-                out.append(f"{parsed_response}\n")
-
-            # Judge prompt (the full prompt sent to the judge)
-            judge_prompt = judge_call.get("judge_prompt", "")
-            if judge_prompt:
-                out.append("\nJudge Prompt:\n", style="bold")
-                out.append(f"{judge_prompt}\n")
-
-            # Judge response
-            judge_response = judge_call.get("judge_response", "")
-            out.append("\nJudge Response:\n", style="bold")
-            out.append(f"{judge_response}\n", style="green" if "yes" in judge_response.lower() else "red")
-
-        return out
-
-    def action_dismiss(self) -> None:
-        self.dismiss()
 
 
 # ----------------------------
@@ -554,8 +388,6 @@ class ViewRunScreen(Screen):
         Binding("b,backspace", "back", "Back"),
         Binding("left,h", "prev_record", "Previous"),
         Binding("right,l", "next_record", "Next"),
-        Binding("t", "show_tools", "Tools"),
-        Binding("j", "show_judge", "Judge"),
     ]
 
     def __init__(self, run: RunInfo):
@@ -743,22 +575,6 @@ class ViewRunScreen(Screen):
             # Reset scroll positions
             self.query_one("#prompt-scroll").scroll_y = 0
             self.query_one("#completion-scroll").scroll_y = 0
-
-    def action_show_tools(self) -> None:
-        """Show tools modal for current rollout."""
-        if not self.records:
-            return
-        record = self.records[self.current_record_idx]
-        tools_data = record.get("tools", None)
-        self.app.push_screen(ToolsModal(tools_data))
-
-    def action_show_judge(self) -> None:
-        """Show judge modal for current rollout."""
-        if not self.records:
-            return
-        record = self.records[self.current_record_idx]
-        judge_data = record.get("judge_data", None)
-        self.app.push_screen(JudgeModal(judge_data))
 
 
 # ----------------------------

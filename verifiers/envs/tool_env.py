@@ -40,23 +40,6 @@ class ToolEnv(MultiTurnEnv):
         tool_name = getattr(tool, "__name__", tool.__class__.__name__)
         self.tool_map.pop(tool_name)
 
-    async def init_state(
-        self,
-        prompt: Messages,
-        completion: Messages,
-        answer: str,
-        task: str,
-        info: Any,
-        example_id: int,
-        **kwargs,
-    ) -> State:
-        state = await super().init_state(
-            prompt, completion, answer, task, info, example_id, **kwargs
-        )
-        # Store the available tools in the state for debugging/logging
-        state["tools"] = self.oai_tools
-        return state
-
     async def is_completed(
         self, messages: Messages, state: State, **kwargs: Any
     ) -> bool:
