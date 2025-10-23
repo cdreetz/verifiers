@@ -167,6 +167,8 @@ def make_dataset(results: GenerateOutputs, **kwargs) -> Dataset:
     clean_completions = [sanitize_tool_calls(c) for c in clean_completions]
     save_info = any(info != {} for info in results.info)
     save_answer = any(answer != "" for answer in results.answer)
+    save_tools = any("tools" in s and s["tools"] for s in results.state)
+    save_judge_data = any("judge_data" in s and s["judge_data"] for s in results.state)
     results_dict = {
         "example_id": results.example_id,
         "prompt": clean_prompts,
@@ -181,6 +183,10 @@ def make_dataset(results: GenerateOutputs, **kwargs) -> Dataset:
         results_dict["info"] = results.info
     if save_answer:
         results_dict["answer"] = results.answer
+    if save_tools:
+        results_dict["tools"] = [s.get("tools", None) for s in results.state]
+    if save_judge_data:
+        results_dict["judge_data"] = [s.get("judge_data", None) for s in results.state]
     for k in results.metrics:
         v = results.metrics[k]
         results_dict[k] = v

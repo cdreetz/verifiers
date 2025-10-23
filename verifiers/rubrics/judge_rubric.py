@@ -141,4 +141,17 @@ class JudgeRubric(Rubric):
             cached = {}
         cached[judge_prompt] = judge_response
         state["judge_response"] = cached
+
+        # Store structured judge data for TUI display
+        if "judge_data" not in state:
+            state["judge_data"] = []
+        state["judge_data"].append({
+            "judge_prompt": judge_prompt,
+            "judge_response": judge_response,
+            "question": question,
+            "answer": answer,
+            "parsed_response": response,
+            "judge_model": self.judge_model,
+        })
+
         return judge_response
