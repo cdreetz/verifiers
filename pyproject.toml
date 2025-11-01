@@ -72,6 +72,7 @@ envs = [
     "brave-search",
     "nltk",
     "textarena",
+    "chromadb>=0.5.0",
 ]
 all = [
     "torch>=2.7.0",

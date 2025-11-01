@@ -12,6 +12,7 @@ from .envs.multiturn_env import MultiTurnEnv
 from .envs.singleturn_env import SingleTurnEnv
 from .envs.stateful_tool_env import StatefulToolEnv
 from .envs.tool_env import ToolEnv
+from .envs.semantic_search_env import SemanticSearchEnv
 from .parsers.parser import Parser
 from .parsers.think_parser import ThinkParser
 from .parsers.xml_parser import XMLParser
@@ -82,6 +83,7 @@ __all__ = [
     "SandboxEnv",
     "StatefulToolEnv",
     "ToolEnv",
+    "SemanticSearchEnv",
     "EnvGroup",
     "extract_boxed_answer",
     "extract_hash_answer",
