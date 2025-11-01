@@ -28,8 +28,6 @@ class WikiSemanticSearchEnv(vf.SemanticSearchEnv):
         super().__init__(collection_name=collection_name, **kwargs)
     
     def prep_corpus(self) -> None:
-        """Load Wikipedia articles and prepare for semantic search."""
-        # Load the dataset
         corpus = load_dataset(self.corpus_dataset, split=self.corpus_split)
         
         page_ids = []
@@ -70,15 +68,14 @@ class WikiSemanticSearchEnv(vf.SemanticSearchEnv):
         Example:
             "basketball" -> [{"page_id": "basketball", "title": "Basketball"}, ...]
         """
-        # Use base search but only need metadata (has title)
         results = await self.search_documents(
             query=query,
             n_results=10,
-            return_contents=False,  # Don't need the embedded text back
+            return_contents=False,
             return_metadata=True
         )
         
-        # Format for Wiki use case
+        # wiki search format
         output = []
         for result in results:
             output.append({
@@ -148,11 +145,9 @@ class WikiSemanticSearchEnv(vf.SemanticSearchEnv):
         content = self.page_id_to_content[page_id]
         lines = content.split("\n")
         
-        # Handle full page request
         if section_name_id == "full":
             return content
         
-        # Find section boundaries
         section_start = None
         section_end = None
         
@@ -174,7 +169,6 @@ class WikiSemanticSearchEnv(vf.SemanticSearchEnv):
 
 
 async def judge_reward_func(judge, prompt, completion, answer, state) -> float:
-    """Reward function for trivia answers."""
     judge_response = await judge(prompt, completion, answer, state)
     return 1.0 if "yes" in judge_response.lower() else 0.0
 
@@ -193,6 +187,12 @@ def load_environment(
         max_turns=max_turns,
         **kwargs
     )
+
+    # use variation of search document as the original env
+    # searches and returns page titles instead of document contents
+    # maybe we update this later to do more standard document search via content embd
+    vf_env.remove_tool(vf_env.search_documents)
+    vf_env.add_tool(vf_env.search_pages)
     vf_env.add_tool(vf_env.view_sections)
     vf_env.add_tool(vf_env.read_section)
     

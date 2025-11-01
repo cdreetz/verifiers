@@ -35,9 +35,27 @@ class SemanticSearchEnv(vf.ToolEnv):
         self.check_server_running()
 
         self.add_tool(self.search_documents)
+
+    @abstractmethod
+    def prep_corpus(self) -> None:
+        """Prepare and load the corpus into the vector database.
+        
+        This method should:
+        1. Load data from the source
+        2. Upsert documents into the ChromaDB collection
+        """
+        raise NotImplementedError("Subclasses must implement prep_corpus")
+
+    def setup_vector_db(self):
+        """Persistent client for creating and adding documents during init"""
+        self.setup_client = chromadb.PersistentClient(path=self.chroma_db_dir)
+        self.collection = self.setup_client.get_or_create_collection(
+            name=self.collection_name,
+            embedding_function=self.emb_fn
+        )
     
     async def get_async_client(self):
-        """Get the async client for querying the collection."""
+        """Async cient for querying via client-server"""
         if self.async_client is None:
             self.async_client = await chromadb.AsyncHttpClient(
                 host="localhost",
@@ -46,42 +64,14 @@ class SemanticSearchEnv(vf.ToolEnv):
         return self.async_client
 
     def check_server_running(self):
-        """Check if ChromaDB server is running and accessible."""
         try:
             client = chromadb.HttpClient(host="localhost", port=self.chroma_server_port)
-            heartbeat = client.heartbeat()
-            print(f"ChromaDB heartbeat: {heartbeat}")
-            if heartbeat == 0:
-                raise RuntimeError(
-                    f"ChromaDB server at localhost:{self.chroma_server_port} is not healthy "
-                    "(heartbeat returned zero). Please ensure the server is running properly."
-                )
+            client.heartbeat()
         except Exception:
             raise RuntimeError(
                 f"ChromaDB server is not running at localhost:{self.chroma_server_port}. "
                 f"Please start the server: chroma run --path {self.chroma_db_dir}"
             ) from None
-    
-    def setup_vector_db(self):
-        """Setup ChromaDB with persistent client during initialization."""
-        self.setup_client = chromadb.PersistentClient(path=self.chroma_db_dir)
-        self.collection = self.setup_client.get_or_create_collection(
-            name=self.collection_name,
-            embedding_function=self.emb_fn
-        )
-    
-    @abstractmethod
-    def prep_corpus(self) -> None:
-        """Prepare and load the corpus into the vector database.
-        
-        This method should:
-        1. Load data from the source
-        2. Upsert documents into the ChromaDB collection
-        
-        Raises:
-            NotImplementedError: Must be implemented by subclass
-        """
-        raise NotImplementedError("Subclasses must implement prep_corpus")
 
    # doing upsert as thats what was used in original wiki search env 
    # but pretty sure this could just be .add since we are only upserting new documents
@@ -94,14 +84,6 @@ class SemanticSearchEnv(vf.ToolEnv):
         metadatas: Optional[List[Dict[str, Any]]] = None,
         batch_size: int = 500
     ) -> None:
-        """Helper method to upsert documents into ChromaDB.
-        
-        Args:
-            document_ids: List of document IDs
-            documents: List of document texts to embed
-            metadatas: Optional list of metadata dictionaries
-            batch_size: Batch size for upserting
-        """
         all_ids = document_ids
         existing: set[str] = set()
         
