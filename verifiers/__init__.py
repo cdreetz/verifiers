@@ -92,6 +92,8 @@ __all__ = [
     "SingleTurnEnv",
     "PythonEnv",
     "SandboxEnv",
+    "MCPEnv",
+    "SandboxMCPEnv",
     "StatefulToolEnv",
     "ToolEnv",
     "EnvGroup",
@@ -128,6 +130,8 @@ _LAZY_IMPORTS = {
     "PythonEnv": "verifiers.envs.python_env:PythonEnv",
     "ReasoningGymEnv": "verifiers.envs.reasoninggym_env:ReasoningGymEnv",
     "TextArenaEnv": "verifiers.envs.textarena_env:TextArenaEnv",
+    "MCPEnv": "verifiers.envs.mcp:MCPEnv",
+    "SandboxMCPEnv": "verifiers.envs.mcp:SandboxMCPEnv",
 }
 
 
@@ -145,6 +149,7 @@ def __getattr__(name: str):
 
 
 if TYPE_CHECKING:
+    from .envs.mcp import MCPEnv, SandboxMCPEnv  # noqa: F401
     from .envs.python_env import PythonEnv  # noqa: F401
     from .envs.reasoninggym_env import ReasoningGymEnv  # noqa: F401
     from .envs.sandbox_env import SandboxEnv  # noqa: F401
