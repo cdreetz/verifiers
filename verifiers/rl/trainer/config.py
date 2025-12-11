@@ -20,11 +20,11 @@ class RLConfig(TrainingArguments):
         metadata={"help": "Whether to use LoRA."},
     )
     lora_rank: int = field(
-        default=16,
+        default=8,
         metadata={"help": "LoRA rank."},
     )
     lora_alpha: int = field(
-        default=16,
+        default=32,
         metadata={"help": "LoRA alpha."},
     )
     lora_dropout: float = field(
@@ -33,7 +33,7 @@ class RLConfig(TrainingArguments):
     )
     lora_target_modules: List[str] | str | None = field(
         default=None,
-        metadata={"help": "LoRA target modules."},
+        metadata={"help": "LoRA target modules (all linear layers by default)."},
     )
     lora_modules_to_save: Optional[List[str]] = field(
         default=None,
@@ -97,7 +97,7 @@ class RLConfig(TrainingArguments):
         metadata={"help": "Beta2 for `AdamW` optimizer."},
     )
     weight_decay: float = field(
-        default=0.01,
+        default=0.0,
         metadata={"help": "Weight decay for `AdamW` optimizer."},
     )
     mask_ratio_low: float = field(
@@ -281,7 +281,6 @@ class RLConfig(TrainingArguments):
         # configure lora
         if not self.use_lora:
             self.lora_config = None
-            # raise ValueError("RLTrainer is LoRA-only; set `use_lora=True`.")
         else:
             if self.lora_target_modules is None:
                 self.lora_target_modules = [
@@ -321,6 +320,8 @@ class RLConfig(TrainingArguments):
                 "spaces_between_special_tokens": False,
                 "include_stop_str_in_output": False,
                 "return_tokens_as_token_ids": True,
+                "return_token_ids": True,
+                "prompt_logprobs": True,
             },
         }
         self.gradient_accumulation_steps = 1
