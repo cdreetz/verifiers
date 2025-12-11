@@ -2,7 +2,6 @@ import argparse
 import asyncio
 import importlib.resources
 import json
-import logging
 import os
 from typing import Any, Dict
 
@@ -11,11 +10,11 @@ try:
 except ImportError:
     import tomli as tomllib  # type: ignore[unresolved-import]
 
-from verifiers import setup_logging
 from verifiers.types import ClientConfig, EvalConfig
+from verifiers.utils.eval_logger_utils import get_eval_logger, setup_eval_logging
 from verifiers.utils.eval_utils import load_endpoints, run_evaluation
 
-logger = logging.getLogger(__name__)
+logger = get_eval_logger(__name__)
 
 DEFAULT_NUM_EXAMPLES = 5
 DEFAULT_ROLLOUTS_PER_EXAMPLE = 3
@@ -220,7 +219,7 @@ def main():
     )
     args = parser.parse_args()
 
-    setup_logging("DEBUG" if args.verbose else os.getenv("VF_LOG_LEVEL", "INFO"))
+    setup_eval_logging("DEBUG" if args.verbose else os.getenv("VF_LOG_LEVEL", "INFO"))
 
     # apply defaults: CLI args take precedence, then env defaults, then global defaults
     env_defaults = get_env_eval_defaults(args.env_id)

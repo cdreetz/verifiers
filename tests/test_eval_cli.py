@@ -61,7 +61,7 @@ def _run_cli(monkeypatch, overrides):
         "parse_args",
         lambda self: args_namespace,
     )
-    monkeypatch.setattr(vf_eval, "setup_logging", lambda *_, **__: None)
+    monkeypatch.setattr(vf_eval, "setup_eval_logging", lambda *_, **__: None)
     monkeypatch.setattr(vf_eval, "load_endpoints", lambda *_: {})
 
     async def fake_run_evaluation(config):

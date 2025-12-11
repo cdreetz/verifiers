@@ -1,6 +1,5 @@
 import importlib.util
 import json
-import logging
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -13,11 +12,12 @@ from datasets.utils import logging as ds_logging
 import verifiers as vf
 from verifiers.types import Endpoints, EvalConfig, GenerateMetadata, GenerateOutputs
 from verifiers.utils.client_utils import setup_client
+from verifiers.utils.eval_logger_utils import get_eval_logger
 from verifiers.utils.logging_utils import print_prompt_completions_sample
 from verifiers.utils.message_utils import messages_to_printable, sanitize_tool_calls
 from verifiers.utils.path_utils import get_eval_results_path
 
-logger = logging.getLogger(__name__)
+logger = get_eval_logger(__name__)
 
 
 def load_endpoints(endpoints_path: str):
