@@ -39,6 +39,13 @@ from .utils.logging_utils import (
     quiet_verifiers,
     setup_logging,
 )
+from .utils.completion_converters import (
+    anthropic_message_to_openai,
+    anthropic_messages_to_openai,
+    anthropic_to_completion,
+    openai_response_to_completion,
+    openai_response_output_to_completion,
+)
 
 # Setup default logging configuration
 setup_logging(os.getenv("VF_LOG_LEVEL", "INFO"))
@@ -85,6 +92,11 @@ __all__ = [
     "cleanup",
     "stop",
     "teardown",
+    "anthropic_message_to_openai",
+    "anthropic_messages_to_openai",
+    "anthropic_to_completion",
+    "openai_response_to_completion",
+    "openai_response_output_to_completion",
 ]
 
 _LAZY_IMPORTS = {
