@@ -1,5 +1,9 @@
 # reasoning-gym-env
 
+<a href="https://github.com/PrimeIntellect-ai/verifiers/tree/main/environments/reasoning_gym_env">
+<img src="https://img.shields.io/badge/GitHub-181717?style=for-the-badge&logo=github&logoColor=white" alt="Source Code">
+</a>
+
 ### Overview
 - **Environment ID**: `reasoning-gym-env`
 - **Short description**: Single-turn evaluation over `reasoning_gym` procedural tasks with XML formatting.
@@ -19,13 +23,13 @@
 Run an evaluation with default settings:
 
 ```bash
-uv run vf-eval reasoning-gym-env
+prime eval run reasoning-gym-env
 ```
 
 Configure model and sampling:
 
 ```bash
-uv run vf-eval reasoning-gym-env \
+prime eval run reasoning-gym-env \
   -m gpt-4.1-mini \
   -n 20 -r 3 -t 1024 -T 0.7 \
   -a '{"gym": "arc_1d", "num_train_examples": 2000, "num_eval_examples": 2000}'

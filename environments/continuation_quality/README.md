@@ -1,5 +1,9 @@
 # continuation-quality
 
+<a href="https://github.com/PrimeIntellect-ai/verifiers/tree/main/environments/continuation_quality">
+<img src="https://img.shields.io/badge/GitHub-181717?style=for-the-badge&logo=github&logoColor=white" alt="Source Code">
+</a>
+
 ### Overview
 - **Environment ID**: `continuation-quality`
 - **Short description**: Single-turn quality grades on base model continuations using a judge model.
@@ -19,13 +23,13 @@
 Run an evaluation with default settings:
 
 ```bash
-uv run vf-eval continuation-quality
+prime eval run continuation-quality
 ```
 
 Configure model and sampling:
 
 ```bash
-uv run vf-eval continuation-quality   -m gpt-4.1-mini   -n 20 -r 3 -t 1024 -T 0.7   -a '{"key": "value"}'  # env-specific args as JSON
+prime eval run continuation-quality   -m gpt-4.1-mini   -n 20 -r 3 -t 1024 -T 0.7   -a '{"key": "value"}'  # env-specific args as JSON
 ```
 
 Notes:

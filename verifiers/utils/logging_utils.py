@@ -2,13 +2,18 @@ import json
 import logging
 import sys
 from collections.abc import Mapping
+from contextlib import contextmanager
 
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+from verifiers.errors import Error
 from verifiers.types import Messages
+from verifiers.utils.error_utils import ErrorChain
+
+LOGGER_NAME = "verifiers"
 
 
 def setup_logging(
@@ -32,7 +37,9 @@ def setup_logging(
     handler = logging.StreamHandler(sys.stderr)
     handler.setFormatter(logging.Formatter(fmt=log_format, datefmt=date_format))
 
-    logger = logging.getLogger("verifiers")
+    logger = logging.getLogger(LOGGER_NAME)
+    # Remove any existing handlers to avoid duplicates
+    logger.handlers.clear()
     logger.setLevel(level.upper())
     logger.addHandler(handler)
 
@@ -40,9 +47,36 @@ def setup_logging(
     logger.propagate = False
 
 
+@contextmanager
+def log_level(level: str | int):
+    """
+    Context manager to temporarily set the verifiers logger to a new log level.
+    Useful for temporarily silencing verifiers logging.
+
+    with log_level("DEBUG"):
+        # verifiers logs at DEBUG level here
+        ...
+    # reverts to previous level
+    """
+    logger = logging.getLogger(LOGGER_NAME)
+    prev_level = logger.level
+    new_level = level if isinstance(level, int) else getattr(logging, level.upper())
+    logger.setLevel(new_level)
+    try:
+        yield
+    finally:
+        logger.setLevel(prev_level)
+
+
+def quiet_verifiers():
+    """Context manager to temporarily silence verifiers logging by setting WARNING level."""
+    return log_level("WARNING")
+
+
 def print_prompt_completions_sample(
     prompts: list[Messages],
     completions: list[Messages],
+    errors: list[Error | None],
     rewards: list[float],
     step: int,
     num_samples: int = 1,
@@ -98,6 +132,12 @@ def print_prompt_completions_sample(
 
         return out
 
+    def _format_error(error: BaseException) -> Text:
+        out = Text()
+        out.append(f"error: {ErrorChain(error)}", style="bold red")
+
+        return out
+
     console = Console()
     table = Table(show_header=True, header_style="bold white", expand=True)
 
@@ -113,10 +153,13 @@ def print_prompt_completions_sample(
     for i in range(samples_to_show):
         prompt = list(prompts)[i]
         completion = list(completions)[i]
+        error = errors[i]
         reward = reward_values[i]
 
         formatted_prompt = _format_messages(prompt)
         formatted_completion = _format_messages(completion)
+        if error is not None:
+            formatted_completion += Text("\n\n") + _format_error(error)
 
         table.add_row(formatted_prompt, formatted_completion, Text(f"{reward:.2f}"))
         if i < samples_to_show - 1:
@@ -124,3 +167,31 @@ def print_prompt_completions_sample(
 
     panel = Panel(table, expand=False, title=f"Step {step}", border_style="bold white")
     console.print(panel)
+
+
+def print_time(time_s: float) -> str:
+    """
+    Format a time in seconds to a human-readable format:
+    - >1d -> Xd Yh
+    - >1h -> Xh Ym
+    - >1m -> Xm Ys
+    - <1s -> Xms
+    - Else: Xs
+    """
+    if time_s >= 86400:  # >1d
+        d = time_s // 86400
+        h = (time_s % 86400) // 3600
+        return f"{d:.0f}d" + (f" {h:.0f}h" if h > 0 else "")
+    elif time_s >= 3600:  # >1h
+        h = time_s // 3600
+        m = (time_s % 3600) // 60
+        return f"{h:.0f}h" + (f" {m:.0f}m" if m > 0 else "")
+    elif time_s >= 60:  # >1m
+        m = time_s // 60
+        s = (time_s % 60) // 1
+        return f"{m:.0f}m" + (f" {s:.0f}s" if s > 0 else "")
+    elif time_s < 1:  # <1s
+        ms = time_s * 1e3
+        return f"{ms:.0f}ms"
+    else:
+        return f"{time_s:.0f}s"

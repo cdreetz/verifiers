@@ -1,4 +1,4 @@
-from typing import AsyncContextManager
+from typing import Any, AsyncContextManager
 
 from verifiers.rubrics.rubric import Rubric
 from verifiers.types import (
@@ -17,7 +17,7 @@ class RubricGroup(Rubric):
             raise ValueError("RubricGroup must have at least one rubric")
         super().__init__(**kwargs)
         self.rubrics = rubrics
-        self.logger.info(f"Initialized RubricGroup with {len(rubrics)} rubrics")
+        self.logger.debug(f"Initialized RubricGroup with {len(rubrics)} rubrics")
 
     def _get_reward_func_names(self) -> list[str]:
         names = []
@@ -41,6 +41,16 @@ class RubricGroup(Rubric):
         assert len(self.rubrics) > 0, "RubricGroup must have at least one rubric"
         self.logger.warning("Adding reward function to the first rubric in the group.")
         self.rubrics[0].add_reward_func(func, weight)
+
+    def add_metric(self, func: RewardFunc, weight: float = 0.0):
+        assert len(self.rubrics) > 0, "RubricGroup must have at least one rubric"
+        self.logger.warning("Adding metric to the first rubric in the group.")
+        self.rubrics[0].add_metric(func, weight)
+
+    def add_class_object(self, name: str, obj: Any):
+        assert len(self.rubrics) > 0, "RubricGroup must have at least one rubric"
+        self.logger.warning("Adding class object to the first rubric in the group.")
+        self.rubrics[0].add_class_object(name, obj)
 
     async def score_rollout(self, state: State, score_sem: AsyncContextManager):
         """

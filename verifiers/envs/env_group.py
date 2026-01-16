@@ -1,5 +1,5 @@
 import time
-from typing import TYPE_CHECKING, AsyncContextManager, Mapping
+from typing import TYPE_CHECKING, AsyncContextManager, Mapping, final
 
 from datasets import Dataset, concatenate_datasets
 from openai import AsyncOpenAI
@@ -157,20 +157,29 @@ class EnvGroup(vf.Environment):
         # concatenate datasets - override task column to use env_names for routing
         datasets = []
         eval_datasets = []
-        for env, name in zip(self.envs, self.env_names):
+
+        def make_add_task_fn(task_name: str):
+            """Factory function to avoid closure capturing loop variable by reference."""
 
             def add_task(example):
-                example["task"] = name
+                example["task"] = task_name
                 return example
 
-            env_dataset = env.get_dataset()
+            return add_task
+
+        for env, name in zip(self.envs, self.env_names):
+            add_task = make_add_task_fn(name)
+
+            # Access dataset directly to avoid get_dataset() raising when None
+            env_dataset = env.dataset
             if env_dataset is not None:
                 # override task column to use env_name for routing
                 if "task" in env_dataset.column_names:
                     env_dataset = env_dataset.remove_columns(["task"])
                 env_dataset = env_dataset.map(add_task, **map_kwargs)
                 datasets.append(env_dataset)
-            env_eval_dataset = env.get_eval_dataset()
+            # Access eval_dataset directly to avoid get_eval_dataset() raising when None
+            env_eval_dataset = env.eval_dataset
             if env_eval_dataset is not None:
                 # override task column to use env_name for routing
                 if "task" in env_eval_dataset.column_names:
@@ -197,7 +206,7 @@ class EnvGroup(vf.Environment):
             f"Initialized EnvGroup with {len(envs)} environments: {self.env_names}"
         )
 
-    def format_dataset(
+    def _format_dataset(
         self,
         dataset: Dataset,
         system_prompt: str | None = None,
@@ -232,20 +241,28 @@ class EnvGroup(vf.Environment):
         )
         return dataset
 
-    async def init_state(
-        self,
-        input: RolloutInput,
-        client: AsyncOpenAI,
-        model: str,
-        sampling_args: SamplingArgs | None = None,
-    ) -> vf.State:
-        env = self.get_env_for_task(input["task"])
-        return await env.init_state(input, client, model, sampling_args)
+    def _format_completion_dataset(
+        self, dataset: Dataset, map_kwargs: dict = {}
+    ) -> Dataset:
+        """
+        Ensure unique example_ids and mapped tasks across concatenated datasets.
+        """
+        # ensure unique example_ids across concatenated datasets
+        if "example_id" in dataset.column_names:
+            dataset = dataset.remove_columns(["example_id"])
 
-    async def setup_state(self, state: vf.State) -> vf.State:
-        env = self.get_env_for_task(state["task"])
-        return await env.setup_state(state)
+        def add_example_id(example, i):
+            example["example_id"] = i
+            return example
 
+        dataset = dataset.map(add_example_id, with_indices=True, **map_kwargs)
+        assert "example_id" in dataset.column_names
+        assert "task" in dataset.column_names, (
+            "Task column should be set during concatenation in __init__"
+        )
+        return dataset
+
+    @final
     async def rollout(
         self,
         input: RolloutInput,
@@ -260,7 +277,19 @@ class EnvGroup(vf.Environment):
         return self.env_map.get(task, self.envs[0])
 
     def set_max_seq_len(self, max_seq_len: int | None) -> None:
-        """Set the maximum sequence length for this environment group and all sub-environments."""
+        """Set the max_seq_len value for this environment group and all sub-environments."""
         self.max_seq_len = max_seq_len
         for env in self.envs:
             env.set_max_seq_len(max_seq_len)
+
+    def set_interleaved_rollouts(self, interleaved_rollouts: bool) -> None:
+        """Set the interleaved_rollouts flag for this environment group and all sub-environments."""
+        self.interleaved_rollouts = interleaved_rollouts
+        for env in self.envs:
+            env.set_interleaved_rollouts(interleaved_rollouts)
+
+    def set_score_rollouts(self, score_rollouts: bool) -> None:
+        """Set the score_rollouts flag for this environment group and all sub-environments."""
+        self.score_rollouts = score_rollouts
+        for env in self.envs:
+            env.set_score_rollouts(score_rollouts)

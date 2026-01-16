@@ -1,14 +1,13 @@
-__version__ = "0.1.8.post2"
+__version__ = "0.1.9.post3"
 
 import importlib
-import logging
 import os
-import sys
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 # early imports to avoid circular dependencies
+from .errors import *  # noqa # isort: skip
 from .types import *  # noqa # isort: skip
-from .utils.decorators import (  # noqa # isort: skip
+from .decorators import (  # noqa # isort: skip
     cleanup,
     stop,
     teardown,
@@ -28,51 +27,20 @@ from .parsers.think_parser import ThinkParser
 from .parsers.xml_parser import XMLParser
 from .rubrics.judge_rubric import JudgeRubric
 from .rubrics.rubric_group import RubricGroup
-from .rubrics.tool_rubric import ToolRubric
 from .utils.data_utils import (
     extract_boxed_answer,
     extract_hash_answer,
     load_example_dataset,
 )
 from .utils.env_utils import load_environment
-from .utils.logging_utils import print_prompt_completions_sample
-
+from .utils.logging_utils import (
+    log_level,
+    print_prompt_completions_sample,
+    quiet_verifiers,
+    setup_logging,
+)
 
 # Setup default logging configuration
-def setup_logging(
-    level: str = "INFO",
-    log_format: Optional[str] = None,
-    date_format: Optional[str] = None,
-) -> None:
-    """
-    Setup basic logging configuration for the verifiers package.
-
-    Args:
-        level: The logging level to use. Defaults to "INFO".
-        log_format: Custom log format string. If None, uses default format.
-        date_format: Custom date format string. If None, uses default format.
-    """
-    if log_format is None:
-        log_format = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-    if date_format is None:
-        date_format = "%Y-%m-%d %H:%M:%S"
-
-    # Create a StreamHandler that writes to stderr
-    handler = logging.StreamHandler(sys.stderr)
-    handler.setFormatter(logging.Formatter(fmt=log_format, datefmt=date_format))
-
-    # Get the root logger for the verifiers package
-    logger = logging.getLogger("verifiers")
-    # Remove any existing handlers to avoid duplicates
-    logger.handlers.clear()
-    # Add a new handler with desired log level
-    logger.setLevel(level.upper())
-    logger.addHandler(handler)
-
-    # Prevent the logger from propagating messages to the root logger
-    logger.propagate = False
-
-
 setup_logging(os.getenv("VF_LOG_LEVEL", "INFO"))
 
 __all__ = [
@@ -83,10 +51,13 @@ __all__ = [
     "Rubric",
     "JudgeRubric",
     "RubricGroup",
-    "ToolRubric",
     "MathRubric",
     "TextArenaEnv",
     "ReasoningGymEnv",
+    "GymEnv",
+    "CliAgentEnv",
+    "HarborEnv",
+    "MCPEnv",
     "Environment",
     "MultiTurnEnv",
     "SingleTurnEnv",
@@ -99,6 +70,8 @@ __all__ = [
     "extract_hash_answer",
     "load_example_dataset",
     "setup_logging",
+    "log_level",
+    "quiet_verifiers",
     "load_environment",
     "print_prompt_completions_sample",
     "get_model",
@@ -126,8 +99,12 @@ _LAZY_IMPORTS = {
     "MathRubric": "verifiers.rubrics.math_rubric:MathRubric",
     "SandboxEnv": "verifiers.envs.sandbox_env:SandboxEnv",
     "PythonEnv": "verifiers.envs.python_env:PythonEnv",
-    "ReasoningGymEnv": "verifiers.envs.reasoninggym_env:ReasoningGymEnv",
-    "TextArenaEnv": "verifiers.envs.textarena_env:TextArenaEnv",
+    "GymEnv": "verifiers.envs.experimental.gym_env:GymEnv",
+    "CliAgentEnv": "verifiers.envs.experimental.cli_agent_env:CliAgentEnv",
+    "HarborEnv": "verifiers.envs.experimental.harbor_env:HarborEnv",
+    "MCPEnv": "verifiers.envs.experimental.mcp_env:MCPEnv",
+    "ReasoningGymEnv": "verifiers.envs.integrations.reasoninggym_env:ReasoningGymEnv",
+    "TextArenaEnv": "verifiers.envs.integrations.textarena_env:TextArenaEnv",
 }
 
 
@@ -145,10 +122,14 @@ def __getattr__(name: str):
 
 
 if TYPE_CHECKING:
+    from .envs.experimental.cli_agent_env import CliAgentEnv  # noqa: F401
+    from .envs.experimental.gym_env import GymEnv  # noqa: F401
+    from .envs.experimental.harbor_env import HarborEnv  # noqa: F401
+    from .envs.experimental.mcp_env import MCPEnv  # noqa: F401
+    from .envs.integrations.reasoninggym_env import ReasoningGymEnv  # noqa: F401
+    from .envs.integrations.textarena_env import TextArenaEnv  # noqa: F401
     from .envs.python_env import PythonEnv  # noqa: F401
-    from .envs.reasoninggym_env import ReasoningGymEnv  # noqa: F401
     from .envs.sandbox_env import SandboxEnv  # noqa: F401
-    from .envs.textarena_env import TextArenaEnv  # noqa: F401
     from .rl.trainer import (  # noqa: F401
         GRPOConfig,
         GRPOTrainer,

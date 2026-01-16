@@ -7,7 +7,6 @@ env/
 uv.lock
 .claude/
 .cursorrules
-.cursor/
 .ropeproject/
 .scratch/
 .chroma_db/
@@ -20,26 +19,28 @@ build/
 _build/
 docs/build/
 *.egg-info/
-*/__pycache__/
-*/*/__pycache__/
+__pycache__/
+
 .pytest_cache/
 .ruff_cache/
 *.pyo
 *.pyd
 *.pyc
 
+# prime
+.prime
+
 # libraries
-prime-rl
+/prime-rl
 
 # outputs
 wandb/
-/outputs/
+outputs/
 reports/
 logs/
 .chroma_db/
 
 # development
-local/
 scratch/
 .idea/
 .vscode/

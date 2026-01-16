@@ -39,6 +39,7 @@ def _run_cli(monkeypatch, overrides):
         "max_concurrent": 1,
         "max_concurrent_generation": None,
         "max_concurrent_scoring": None,
+        "independent_scoring": False,
         "max_tokens": 42,
         "temperature": 0.9,
         "sampling_args": None,
@@ -50,6 +51,7 @@ def _run_cli(monkeypatch, overrides):
         "save_every": -1,
         "save_to_hf_hub": False,
         "hf_hub_dataset_name": "",
+        "extra_env_kwargs": {},
     }
     base_args.update(overrides)
     args_namespace = SimpleNamespace(**base_args)

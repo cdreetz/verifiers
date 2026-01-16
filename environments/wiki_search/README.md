@@ -1,5 +1,9 @@
 # wiki-search
 
+<a href="https://github.com/PrimeIntellect-ai/verifiers/tree/main/environments/wiki_search">
+<img src="https://img.shields.io/badge/GitHub-181717?style=for-the-badge&logo=github&logoColor=white" alt="Source Code">
+</a>
+
 ### Overview
 - **Environment ID**: `wiki-search`
 - **Short description**: Multi-turn tool-use QA over a small Wikipedia corpus using ChromaDB and OpenAI embeddings, with judge-based scoring.
@@ -27,13 +31,13 @@
 Run an evaluation with default settings:
 
 ```bash
-uv run vf-eval wiki-search
+prime eval run wiki-search
 ```
 
 Configure model and sampling:
 
 ```bash
-uv run vf-eval wiki-search \
+prime eval run wiki-search \
   -m gpt-4.1-mini \
   -n 20 -r 3 -t 1024 -T 0.7 \
   -a '{"judge_model": "gpt-4.1-mini", "judge_base_url": "https://api.openai.com/v1", "judge_api_key_var": "OPENAI_API_KEY", "embed_model": "text-embedding-3-small", "embed_base_url": "https://api.openai.com/v1", "embed_api_key_var": "OPENAI_API_KEY"}'

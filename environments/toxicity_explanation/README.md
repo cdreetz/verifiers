@@ -1,5 +1,9 @@
 # toxicity-explanation
 
+<a href="https://github.com/PrimeIntellect-ai/verifiers/tree/main/environments/toxicity_explanation">
+<img src="https://img.shields.io/badge/GitHub-181717?style=for-the-badge&logo=github&logoColor=white" alt="Source Code">
+</a>
+
 ### Overview
 - **Environment ID**: `toxicity-explanation`
 - **Short description**: Judge-based evaluation for toxicity classification with explanations using Civil Comments.
@@ -19,13 +23,13 @@
 Run an evaluation with default settings:
 
 ```bash
-uv run vf-eval toxicity-explanation
+prime eval run toxicity-explanation
 ```
 
 Configure model and sampling:
 
 ```bash
-uv run vf-eval toxicity-explanation \
+prime eval run toxicity-explanation \
   -m gpt-4.1-mini \
   -n 20 -r 3 -t 1024 -T 0.7 \
   -a '{"judge_model": "gpt-4.1-mini", "judge_base_url": "https://api.openai.com/v1", "judge_api_key_var": "OPENAI_API_KEY", "max_examples": -1}'

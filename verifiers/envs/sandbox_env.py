@@ -1,9 +1,25 @@
 import asyncio
-import time
+import functools
 import logging
-from typing import Any
+import sys
+import time
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any, Callable
+
+from verifiers.utils.thread_utils import (
+    get_or_create_thread_attr,
+    get_or_create_thread_loop,
+)
+
+if sys.version_info < (3, 12):
+    from typing_extensions import TypedDict
+else:
+    from typing import TypedDict
+
 
 import tenacity as tc
+from prime_sandboxes import CommandTimeoutError
+
 import verifiers as vf
 
 try:
@@ -18,6 +34,87 @@ except ImportError:
     raise ImportError(
         "prime-sandboxes is not installed. Please install it with `uv pip install prime-sandboxes`."
     )
+
+
+class ThreadedAsyncSandboxClient:
+    """
+    Mirrors AsyncSandboxClient's interface but dispatches each method call to a
+    ThreadPoolExecutor where each thread maintains its own client via
+    thread-local storage.
+    """
+
+    def __init__(
+        self,
+        max_workers: int = 100,
+        max_connections: int = 100,
+        max_keepalive_connections: int = 50,
+        **client_kwargs,
+    ):
+        """Initialize the threaded sandbox client."""
+        self.logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
+        self.executor = ThreadPoolExecutor(
+            max_workers=max_workers,
+            thread_name_prefix="sandbox-client-executor",
+        )
+        self.client_kwargs = {
+            "max_connections": max_connections,
+            "max_keepalive_connections": max_keepalive_connections,
+            **client_kwargs,
+        }
+
+    def __getattr__(self, name: str) -> Callable[..., Any]:
+        """Dynamically proxy attribute access to dispatch method calls to the thread pool."""
+
+        @functools.wraps(getattr(AsyncSandboxClient, name, lambda: None))
+        async def wrapper(*args, **kwargs):
+            def run_in_thread():
+                loop = get_or_create_thread_loop()
+                sandbox_client = get_or_create_thread_attr(
+                    "sandbox_client",
+                    AsyncSandboxClient,
+                    **self.client_kwargs,
+                )
+                method = getattr(sandbox_client, name)
+                return loop.run_until_complete(method(*args, **kwargs))
+
+            loop = asyncio.get_event_loop()
+            return await loop.run_in_executor(self.executor, run_in_thread)
+
+        return wrapper
+
+    def teardown(self, wait: bool = True) -> None:
+        """Teardown the thread pool executor."""
+        self.executor.shutdown(wait=wait)
+
+
+class SandboxState(TypedDict):
+    ready: bool
+    ready_wait_time: float
+    command_execution_times: list[float]
+
+
+class SandboxCreationError(vf.SandboxError): ...
+
+
+class SandboxNotReadyError(vf.SandboxError): ...
+
+
+class SandboxMonitorRubric(vf.Rubric):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.add_metric(self.sandbox_ready_wait_time)
+        self.add_metric(self.sandbox_command_execution_time)
+
+    async def sandbox_ready_wait_time(self, state: vf.State) -> float:
+        return state["sandbox_state"]["ready_wait_time"]
+
+    async def sandbox_command_execution_time(self, state: vf.State) -> float:
+        command_execution_times = state["sandbox_state"]["command_execution_times"]
+        return (
+            sum(command_execution_times) / len(command_execution_times)
+            if len(command_execution_times) > 0
+            else 0.0
+        )
 
 
 class SandboxEnv(vf.StatefulToolEnv):
@@ -40,11 +137,23 @@ class SandboxEnv(vf.StatefulToolEnv):
         backoff_factor: float = 2.0,
         max_backoff_seconds: float = 30.0,
         jitter: float = 1e-3,
+        stop_errors: list[type[Exception]] | None = None,
+        sandbox_client_max_workers: int = 10,
+        sandbox_client_max_connections: int = 100,
+        sandbox_client_max_keepalive_connections: int = 50,
         **kwargs,
     ):
-        super().__init__(**kwargs)
+        super().__init__(
+            stop_errors=stop_errors if stop_errors is not None else [vf.SandboxError],
+            **kwargs,
+        )
+        self.add_rubric(SandboxMonitorRubric())
         self.timeout_per_command_seconds = timeout_per_command_seconds
-        self.sandbox_client = AsyncSandboxClient()
+        self.sandbox_client = ThreadedAsyncSandboxClient(
+            max_workers=sandbox_client_max_workers,
+            max_connections=sandbox_client_max_connections,
+            max_keepalive_connections=sandbox_client_max_keepalive_connections,
+        )
         self.sandbox_request = CreateSandboxRequest(
             name=sandbox_name,
             docker_image=docker_image,
@@ -67,32 +176,60 @@ class SandboxEnv(vf.StatefulToolEnv):
                 max=max_backoff_seconds,
                 jitter=jitter,
             ),
-            before_sleep=tc.before_sleep_log(self.logger, logging.ERROR),
+            before_sleep=tc.before_sleep_log(self.logger, logging.WARNING),
             reraise=True,
         ).wraps
-        self.add_tool(self.bash, args_to_skip=["sandbox_id"])
+        self.add_tool(
+            self.bash, args_to_skip=["sandbox_id", "working_dir", "sandbox_state"]
+        )
 
-    async def bash(self, command: str, sandbox_id: str) -> str:
+    async def _wait_for_sandbox_ready(
+        self, sandbox_state: SandboxState, sandbox_id: str
+    ):
+        """Wait for sandbox to be created"""
+        s = time.time()
+        self.logger.debug(f"Waiting for sandbox {sandbox_id} to be ready")
+        try:
+            await self.sandbox_client.wait_for_creation(sandbox_id)
+            sandbox_state["ready"] = True
+        except Exception as e:
+            raise SandboxNotReadyError(e)
+        ready_wait_time = time.time() - s
+        sandbox_state["ready_wait_time"] = ready_wait_time
+        self.logger.debug(f"Waited {ready_wait_time:.1f}s for sandbox to be ready")
+
+    async def bash(
+        self,
+        command: str,
+        sandbox_id: str,
+        sandbox_state: SandboxState,
+        working_dir: str | None = None,
+    ) -> str:
         """Execute `command` inside persistent sandbox container."""
         # sandbox_id is passed via update_tool_args, not seen by model
-        s = time.time()
-        await self.sandbox_client.wait_for_creation(
-            sandbox_id
-        )  # wait for sandbox to be created
-        self.logger.debug(f"Waited {time.time() - s:.1f}s for sandbox to be ready")
+        if not sandbox_state["ready"]:
+            await self._wait_for_sandbox_ready(sandbox_state, sandbox_id)
+
         s = time.time()
         self.logger.debug(f"Executing command {command} in sandbox {sandbox_id}")
         try:
-            results = await asyncio.wait_for(
-                self.sandbox_client.execute_command(sandbox_id, command),
+            results = await self.sandbox_client.execute_command(
+                sandbox_id,
+                command,
+                working_dir=working_dir,
                 timeout=self.timeout_per_command_seconds,
             )
-        except asyncio.TimeoutError:
-            e = time.time()
+        except CommandTimeoutError:
             timeout_msg = f"Command timed out after {self.timeout_per_command_seconds}s"
             self.logger.warning(f"{timeout_msg} in sandbox {sandbox_id}")
+            sandbox_state["command_execution_times"].append(
+                self.timeout_per_command_seconds
+            )
             return f"Error: {timeout_msg}"
-        e = time.time()
+        except Exception as e:
+            raise vf.SandboxError from e
+        command_execution_time = time.time() - s
+        sandbox_state["command_execution_times"].append(command_execution_time)
         stdout = results.stdout.strip()
         stderr = (results.stderr or "").strip()
         combined = stdout
@@ -102,7 +239,9 @@ class SandboxEnv(vf.StatefulToolEnv):
             else:
                 combined = f"stderr:\n{stderr}"
         output = combined or "(no output)"
-        self.logger.debug(f"Executed command in {e - s:.1f}s. Got output: {output}")
+        self.logger.debug(
+            f"Executed command in {command_execution_time:.1f}s. Got output: {output}"
+        )
         return output
 
     async def post_rollout(self, state: vf.State):
@@ -127,16 +266,28 @@ class SandboxEnv(vf.StatefulToolEnv):
         try:
             await self.with_retry(_delete_sandbox)(sandbox_id)
         except Exception as e:
+            # only warn, not raise an error on deletion
             self.logger.warning(f"Failed to delete sandbox {sandbox_id}: {e}")
+
+    def get_sandbox_request(self, state: vf.State) -> CreateSandboxRequest:
+        """Return sandbox request for this rollout. Override to customize per-state."""
+        return self.sandbox_request.model_copy()
 
     async def setup_state(self, state: vf.State, **kwargs) -> vf.State:
         """Create per-rollout sandbox"""
-        sandbox = await self.with_retry(self.sandbox_client.create)(
-            self.sandbox_request
-        )
+        request = self.get_sandbox_request(state)
+        try:
+            sandbox = await self.with_retry(self.sandbox_client.create)(request)
+        except Exception as e:
+            raise SandboxCreationError(e)
         self.active_sandboxes.add(sandbox.id)
         self.logger.debug(f"Created sandbox {sandbox.id}")
         state["sandbox_id"] = sandbox.id
+        state["sandbox_state"] = {
+            "ready": False,
+            "ready_wait_time": 0.0,
+            "command_execution_times": [],
+        }
         return await super().setup_state(state, **kwargs)
 
     def update_tool_args(
@@ -147,25 +298,23 @@ class SandboxEnv(vf.StatefulToolEnv):
         state: vf.State,
         **kwargs,
     ) -> dict[str, Any]:
+        updated_args = dict(tool_args)
         if tool_name == "bash":
-            updated_args = dict(tool_args)
             updated_args["sandbox_id"] = state["sandbox_id"]
-            return updated_args
-        else:
-            return tool_args
+            updated_args["sandbox_state"] = state["sandbox_state"]
+            updated_args["working_dir"] = state.get("working_dir")
+        return updated_args
 
     async def bulk_delete_sandboxes(self, global_ids: list[str]) -> None:
         """Delete multiple sandboxes by their global IDs"""
         try:
-            await self.with_retry(self.sandbox_client.bulk_delete)(
-                global_ids
-            )
+            await self.with_retry(self.sandbox_client.bulk_delete)(global_ids)
             self.logger.debug(f"Bulk deleted sandboxes: {global_ids}")
             self.active_sandboxes.difference_update(global_ids)
         except Exception as e:
             self.logger.error(f"Failed to bulk delete sandboxes {global_ids}: {e}")
 
-    @vf.teardown  # type: ignore
+    @vf.teardown
     async def teardown_sandboxes(self):
         """Delete all active sandboxes using sync client.
 
@@ -183,7 +332,7 @@ class SandboxEnv(vf.StatefulToolEnv):
         # Delete in batches of 100
         batch_size = 100
         for i in range(0, len(sandbox_ids), batch_size):
-            batch = sandbox_ids[i:i + batch_size]
+            batch = sandbox_ids[i : i + batch_size]
             try:
                 sync_client.bulk_delete(sandbox_ids=batch)
                 for sandbox_id in batch:
@@ -191,3 +340,7 @@ class SandboxEnv(vf.StatefulToolEnv):
                 self.logger.debug(f"Bulk deleted batch of {len(batch)} sandboxes")
             except Exception as e:
                 self.logger.warning(f"Bulk delete failed for batch: {e}")
+
+    @vf.teardown
+    async def teardown_sandbox_client(self):
+        self.sandbox_client.teardown()

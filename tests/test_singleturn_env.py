@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from datasets import Dataset
 
+import verifiers as vf
 from verifiers import Parser, Rubric, SingleTurnEnv
 from verifiers.types import RolloutInput, RolloutTiming
 
@@ -76,6 +77,8 @@ class TestSingleTurnEnv:
                     tokens=None,
                     reward=None,
                     advantage=None,
+                    is_truncated=False,
+                    trajectory_id="test_trajectory",
                     extras={},
                 )
             ],
@@ -222,16 +225,17 @@ class TestSingleTurnEnv:
         prompt = [{"role": "user", "content": "Hello"}]
         answer = "Hi"
 
-        with pytest.raises(Exception, match="API Error"):
-            await mock_singleturn_env.rollout(
-                input=RolloutInput(
-                    prompt=prompt,
-                    answer=answer,
-                    example_id=0,
-                ),
-                client=mock_singleturn_env.client,
-                model="test-model",
-            )
+        state = await mock_singleturn_env.rollout(
+            input=RolloutInput(
+                prompt=prompt,
+                answer=answer,
+                example_id=0,
+            ),
+            client=mock_singleturn_env.client,
+            model="test-model",
+        )
+        assert state.get("error") is not None
+        assert isinstance(state["error"], vf.ModelError)
 
     @pytest.mark.asyncio
     async def test_rollout_state_structure(self, mock_singleturn_env):
@@ -485,6 +489,8 @@ class TestSingleTurnEnv:
                 tokens=None,
                 reward=None,
                 advantage=None,
+                is_truncated=False,
+                trajectory_id="test_trajectory",
                 extras={},
             )
         ]
@@ -512,6 +518,8 @@ class TestSingleTurnEnv:
                 tokens=None,
                 reward=None,
                 advantage=None,
+                is_truncated=False,
+                trajectory_id="test_trajectory",
                 extras={},
             ),
             TrajectoryStep(
@@ -521,6 +529,8 @@ class TestSingleTurnEnv:
                 tokens=None,
                 reward=None,
                 advantage=None,
+                is_truncated=False,
+                trajectory_id="test_trajectory",
                 extras={},
             ),
         ]

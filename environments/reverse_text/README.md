@@ -1,5 +1,9 @@
 # reverse-text
 
+<a href="https://github.com/PrimeIntellect-ai/verifiers/tree/main/environments/reverse_text">
+<img src="https://img.shields.io/badge/GitHub-181717?style=for-the-badge&logo=github&logoColor=white" alt="Source Code">
+</a>
+
 ### Overview
 - **Environment ID**: `reverse-text`
 - **Short description**: Reverse a given text; evaluated by LCS similarity between the parsed answer and ground-truth reversal.
@@ -19,13 +23,13 @@
 Run an evaluation with default settings:
 
 ```bash
-uv run vf-eval reverse-text
+prime eval run reverse-text
 ```
 
 Configure model and sampling:
 
 ```bash
-uv run vf-eval reverse-text \
+prime eval run reverse-text \
   -m gpt-4.1-mini \
   -n 20 -r 3 -t 1024 -T 0.7
 ```
