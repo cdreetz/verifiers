@@ -58,6 +58,7 @@ __all__ = [
     "CliAgentEnv",
     "HarborEnv",
     "MCPEnv",
+    "OpenCodeEnv",
     "Environment",
     "MultiTurnEnv",
     "SingleTurnEnv",
@@ -103,6 +104,7 @@ _LAZY_IMPORTS = {
     "CliAgentEnv": "verifiers.envs.experimental.cli_agent_env:CliAgentEnv",
     "HarborEnv": "verifiers.envs.experimental.harbor_env:HarborEnv",
     "MCPEnv": "verifiers.envs.experimental.mcp_env:MCPEnv",
+    "OpenCodeEnv": "verifiers.envs.experimental.opencode_env:OpenCodeEnv",
     "ReasoningGymEnv": "verifiers.envs.integrations.reasoninggym_env:ReasoningGymEnv",
     "TextArenaEnv": "verifiers.envs.integrations.textarena_env:TextArenaEnv",
 }
@@ -126,6 +128,7 @@ if TYPE_CHECKING:
     from .envs.experimental.gym_env import GymEnv  # noqa: F401
     from .envs.experimental.harbor_env import HarborEnv  # noqa: F401
     from .envs.experimental.mcp_env import MCPEnv  # noqa: F401
+    from .envs.experimental.opencode_env import OpenCodeEnv  # noqa: F401
     from .envs.integrations.reasoninggym_env import ReasoningGymEnv  # noqa: F401
     from .envs.integrations.textarena_env import TextArenaEnv  # noqa: F401
     from .envs.python_env import PythonEnv  # noqa: F401
