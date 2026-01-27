@@ -1,10 +1,13 @@
+import os
 import sys
+import warnings
 from pathlib import Path
 from typing import (
     Any,
     Awaitable,
     Callable,
     Literal,
+    Optional,
 )
 
 from verifiers.errors import Error
@@ -32,6 +35,10 @@ from openai.types.shared_params import (  # noqa: F401
     FunctionParameters,
 )
 from pydantic import BaseModel
+
+# Environment variable to control deprecation warnings for State forwarding
+# Set VF_SUPPRESS_STATE_WARNINGS=1 to disable these warnings
+_SUPPRESS_STATE_WARNINGS = os.environ.get("VF_SUPPRESS_STATE_WARNINGS", "0") == "1"
 
 # typing aliases
 ChatMessage = ChatCompletionMessageParam
@@ -93,8 +100,31 @@ class RolloutTiming(TypedDict, total=False):
 
 
 class State(dict):
+    """
+    Rollout state container.
+
+    State is a dict subclass that stores all data for a single rollout.
+    For backward compatibility, it supports implicit forwarding of INPUT_FIELDS
+    to state["input"], but this behavior is deprecated.
+
+    Preferred usage (explicit):
+        state["input"]["prompt"]  # explicit access to input fields
+        state.get_prompt()        # explicit accessor method
+
+    Deprecated usage (implicit forwarding):
+        state["prompt"]           # implicitly forwards to state["input"]["prompt"]
+
+    To suppress deprecation warnings, set VF_SUPPRESS_STATE_WARNINGS=1 in your
+    environment, or call State.suppress_warnings().
+    """
+
     INPUT_FIELDS = ["prompt", "answer", "task", "info", "example_id"]
-    # rollout inputs
+
+    # Class-level flag to control deprecation warnings
+    _warnings_suppressed: bool = _SUPPRESS_STATE_WARNINGS
+    _warning_shown: set = set()  # Track which warnings have been shown
+
+    # Type hints for IDE support (these are stored in dict, not as attributes)
     input: RolloutInput
     client: AsyncOpenAI
     model: str
@@ -112,19 +142,47 @@ class State(dict):
     timing: RolloutTiming | None
     error: Error | None
 
+    @classmethod
+    def suppress_warnings(cls, suppress: bool = True) -> None:
+        """
+        Suppress or enable deprecation warnings for implicit forwarding.
+
+        Args:
+            suppress: If True, suppress warnings. If False, enable them.
+        """
+        cls._warnings_suppressed = suppress
+
+    def _warn_forwarding(self, key: str) -> None:
+        """Emit a deprecation warning for implicit forwarding."""
+        if self._warnings_suppressed:
+            return
+        # Only warn once per key to avoid spam
+        if key in State._warning_shown:
+            return
+        State._warning_shown.add(key)
+        warnings.warn(
+            f"Implicit access to state['{key}'] is deprecated. "
+            f"Use state['input']['{key}'] or state.get_{key}() instead. "
+            f"Set VF_SUPPRESS_STATE_WARNINGS=1 to suppress this warning.",
+            DeprecationWarning,
+            stacklevel=3,
+        )
+
     def __getitem__(self, key: str) -> Any:
-        # forward to input if exists
+        # forward to input if exists (with deprecation warning)
         if key in self.INPUT_FIELDS and "input" in self:
             input_obj = super().__getitem__("input")
             if key in input_obj:
+                self._warn_forwarding(key)
                 return input_obj[key]
         return super().__getitem__(key)
 
     def __setitem__(self, key: str, value: Any) -> None:
-        # forward to input if exists
+        # forward to input if exists (with deprecation warning)
         if key in self.INPUT_FIELDS and "input" in self:
             input_obj = super().__getitem__("input")
             if key in input_obj:
+                self._warn_forwarding(key)
                 input_obj[key] = value
                 return
         super().__setitem__(key, value)
@@ -134,6 +192,48 @@ class State(dict):
             return self[key]
         except KeyError:
             return default
+
+    # Explicit accessor methods (preferred over implicit forwarding)
+    def get_prompt(self) -> Messages:
+        """Get the prompt from input (explicit accessor)."""
+        return self["input"]["prompt"]
+
+    def get_answer(self) -> Optional[str]:
+        """Get the answer from input (explicit accessor)."""
+        return self["input"].get("answer")
+
+    def get_task(self) -> str:
+        """Get the task from input (explicit accessor)."""
+        return self["input"].get("task", "default")
+
+    def get_info(self) -> dict:
+        """Get the info dict from input (explicit accessor)."""
+        return self["input"].get("info", {})
+
+    def get_example_id(self) -> int:
+        """Get the example_id from input (explicit accessor)."""
+        return self["input"]["example_id"]
+
+    def get_input(self) -> RolloutInput:
+        """Get the full input object (explicit accessor)."""
+        return self["input"]
+
+    # Serialization helpers
+    def to_dict(self) -> dict[str, Any]:
+        """
+        Convert State to a plain dict for serialization.
+
+        This flattens the structure and handles non-serializable objects.
+        """
+        result = dict(self)
+        # Remove non-serializable objects
+        result.pop("client", None)
+        return result
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "State":
+        """Create a State from a dict."""
+        return cls(data)
 
 
 # oai tools

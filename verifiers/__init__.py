@@ -40,18 +40,39 @@ from .utils.logging_utils import (
     setup_logging,
 )
 
+# Core abstractions (new in refactor)
+from .core import (
+    ExecutionContext,
+    LifecycleRegistry,
+    StopCondition,
+    CleanupHook,
+    TeardownHook,
+)
+from .utils.async_utils import ResourcePool, create_semaphore
+
 # Setup default logging configuration
 setup_logging(os.getenv("VF_LOG_LEVEL", "INFO"))
 
 __all__ = [
+    # Core abstractions
+    "ExecutionContext",
+    "LifecycleRegistry",
+    "StopCondition",
+    "CleanupHook",
+    "TeardownHook",
+    "ResourcePool",
+    "create_semaphore",
+    # Parsers
     "Parser",
     "ThinkParser",
     "MaybeThinkParser",
     "XMLParser",
+    # Rubrics
     "Rubric",
     "JudgeRubric",
     "RubricGroup",
     "MathRubric",
+    # Environments
     "TextArenaEnv",
     "ReasoningGymEnv",
     "GymEnv",
@@ -66,6 +87,7 @@ __all__ = [
     "StatefulToolEnv",
     "ToolEnv",
     "EnvGroup",
+    # Utilities
     "extract_boxed_answer",
     "extract_hash_answer",
     "load_example_dataset",
@@ -74,6 +96,7 @@ __all__ = [
     "quiet_verifiers",
     "load_environment",
     "print_prompt_completions_sample",
+    # Training
     "get_model",
     "get_model_and_tokenizer",
     "RLTrainer",
@@ -82,6 +105,7 @@ __all__ = [
     "GRPOConfig",
     "grpo_defaults",
     "lora_defaults",
+    # Decorators
     "cleanup",
     "stop",
     "teardown",
