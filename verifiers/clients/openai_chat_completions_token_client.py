@@ -23,10 +23,10 @@ def _has_multimodal_content(messages) -> bool:
         content = msg.get("content") if hasattr(msg, "get") else None
         if isinstance(content, list):
             for part in content:
-                if (hasattr(part, "get") and part.get("type") in (
+                if hasattr(part, "get") and part.get("type") in (
                     "image_url",
                     "input_audio",
-                )):
+                ):
                     return True
     return False
 
