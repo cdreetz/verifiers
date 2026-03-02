@@ -73,14 +73,17 @@ class OpenAIChatCompletionsTokenClient(OpenAIChatCompletionsClient):
 
         sampling_args = normalize_sampling_args(sampling_args)
         state = cast(State, kwargs.pop("state"))
-        # Use standard /chat/completions for: (1) first turn (no prior tokens to
-        # stitch), or (2) multimodal conversations.  VLM image-placeholder
-        # expansion happens inside the engine during generation but NOT in the
-        # /tokenize endpoint, so token-stitching (TITO) operates in a different
-        # coordinate system than /tokenize and produces broken prompts.  Falling
-        # back to message-based inference (MITO) lets vLLM handle expansion
+        # Use standard /chat/completions for: (1) first turn (no prior tokens
+        # to stitch), or (2) conversations that contain multimodal content in
+        # any turn.  vLLM ≤0.16's /tokenize doesn't run the multimodal
+        # processor, so image placeholders stay collapsed (1 token instead of
+        # N) and token-stitching (TITO) produces broken prompts.  Falling back
+        # to message-based inference (MITO) lets vLLM handle expansion
         # correctly on every turn.
-        if len(state["trajectory"]) == 0 or _has_multimodal_content(prompt):
+        has_multimodal = _has_multimodal_content(prompt) or any(
+            _has_multimodal_content(step["prompt"]) for step in state["trajectory"]
+        )
+        if len(state["trajectory"]) == 0 or has_multimodal:
             return await super().get_native_response(
                 prompt, model, sampling_args, tools
             )
