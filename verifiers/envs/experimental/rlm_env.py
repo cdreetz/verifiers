@@ -1953,12 +1953,19 @@ class RLMEnv(vf.StatefulToolEnv):
                    Each list is deduplicated by tool name. If two different tools
                    share a name within a list, initialization raises an error.
         sub_llm_max_turns: Maximum tool-calling turns for sub-LLM calls (default: 5)
-        sub_llm_max_completion_tokens: Total completion-token budget shared across all
+        sub_max_completion_tokens: Total completion-token budget shared across all
                    sub-LLM calls in a rollout.  When set, the environment tracks
                    cumulative sub-LLM completion tokens and refuses new calls once
                    the budget is reached.  The root model is informed of the budget
                    in its system prompt and in the per-batch summary printed after
                    each llm_batch() call.  None (default) means unlimited.
+        root_max_completion_tokens: Total completion-token budget for the root
+                   model across the full rollout.  When set, the environment tracks
+                   cumulative root-model completion tokens and stops the rollout
+                   once the budget is reached, reading the current answer before
+                   halting.  The root model is informed of the budget in its system
+                   prompt and in the per-REPL-call footer appended after each code
+                   execution.  None (default) means unlimited.
         sub_model: Model to use for sub-LLM calls (defaults to same as root model)
         sub_prompt_verbosity: The verbosity of the sub-LLMs' system prompt; "light", "medium", or "heavy"
         root_prompt_verbosity: The verbosity of the root-LLM's system prompt; "light", "medium", or "heavy"
@@ -2007,7 +2014,8 @@ class RLMEnv(vf.StatefulToolEnv):
         root_tools: list[Callable] | None = None,
         sub_tools: list[Callable] | None = None,
         sub_llm_max_turns: int = 5,
-        sub_llm_max_completion_tokens: int | None = None,
+        sub_max_completion_tokens: int | None = None,
+        root_max_completion_tokens: int | None = None,
         sub_model: str | None = None,
         sub_prompt_verbosity: Literal["light", "medium", "heavy"] = "light",
         root_prompt_verbosity: Literal["light", "medium", "heavy"] = "light",
@@ -2055,7 +2063,8 @@ class RLMEnv(vf.StatefulToolEnv):
         self.root_only_tools = root_tools or []
         self.sub_only_tools = sub_tools or []
         self.sub_llm_max_turns = sub_llm_max_turns
-        self.sub_llm_max_completion_tokens = sub_llm_max_completion_tokens
+        self.sub_max_completion_tokens = sub_max_completion_tokens
+        self.root_max_completion_tokens = root_max_completion_tokens
         self.max_output_length = max_output_length
         self.max_sub_llm_parallelism = max_sub_llm_parallelism
         self.custom_system_prompt = system_prompt
@@ -2539,11 +2548,11 @@ class RLMEnv(vf.StatefulToolEnv):
             # Check if the sub-LLM completion token budget is exceeded
             # mid-loop. We combine already-committed tokens (state) with
             # tokens accumulated in this call so far.
-            if self.sub_llm_max_completion_tokens is not None:
+            if self.sub_max_completion_tokens is not None:
                 committed = state.get("sub_llm_completion_tokens", 0)
                 if (
                     committed + total_completion_tokens
-                    >= self.sub_llm_max_completion_tokens
+                    >= self.sub_max_completion_tokens
                 ):
                     break
 
@@ -2605,7 +2614,7 @@ class RLMEnv(vf.StatefulToolEnv):
     def _sub_llm_budget_exhausted_message(self, state_ref: State) -> str:
         """Build a human-readable budget-exhausted message."""
         used = state_ref.get("sub_llm_completion_tokens", 0)
-        budget = self.sub_llm_max_completion_tokens
+        budget = self.sub_max_completion_tokens
         return (
             f"Sub-LLM token budget exhausted "
             f"(used {used}/{budget} completion tokens). "
@@ -2630,15 +2639,15 @@ class RLMEnv(vf.StatefulToolEnv):
             raise RuntimeError("Sub-LLM context is not available.")
 
         # Early exit when budget is already exhausted before starting the batch.
-        if self.sub_llm_max_completion_tokens is not None:
+        if self.sub_max_completion_tokens is not None:
             used = state_ref.get("sub_llm_completion_tokens", 0)
-            if used >= self.sub_llm_max_completion_tokens:
+            if used >= self.sub_max_completion_tokens:
                 msg = self._sub_llm_budget_exhausted_message(state_ref)
                 contents = [msg] * len(prompts)
                 summary_lines = [
                     f"llm_batch: {len(prompts)} call(s) skipped — "
                     f"sub-LLM token budget exhausted "
-                    f"({used}/{self.sub_llm_max_completion_tokens} "
+                    f"({used}/{self.sub_max_completion_tokens} "
                     f"completion tokens used)"
                 ]
                 return contents, summary_lines
@@ -2719,9 +2728,9 @@ class RLMEnv(vf.StatefulToolEnv):
                 f"{tool_calls} tool calls, {elapsed:.2f}s {status}"
             )
 
-        if self.sub_llm_max_completion_tokens is not None:
+        if self.sub_max_completion_tokens is not None:
             used = state_ref.get("sub_llm_completion_tokens", 0)
-            budget = self.sub_llm_max_completion_tokens
+            budget = self.sub_max_completion_tokens
             summary_lines.append(f"  [{used}/{budget} sub-LLM completion tokens used]")
 
         return contents, summary_lines
@@ -2798,10 +2807,10 @@ class RLMEnv(vf.StatefulToolEnv):
         elapsed_seconds: float | None = None,
     ) -> dict[str, Any]:
         # Budget gate: refuse new sub-LLM calls when token budget is exhausted.
-        if self.sub_llm_max_completion_tokens is not None:
+        if self.sub_max_completion_tokens is not None:
             used = state_ref.get("sub_llm_completion_tokens", 0)
-            if used >= self.sub_llm_max_completion_tokens:
-                budget = self.sub_llm_max_completion_tokens
+            if used >= self.sub_max_completion_tokens:
+                budget = self.sub_max_completion_tokens
                 return {
                     "choices": [
                         {
@@ -3199,11 +3208,18 @@ class RLMEnv(vf.StatefulToolEnv):
                     message_history_docs = _RLM_MESSAGE_HISTORY_NOTE_BASH
                 else:
                     message_history_docs = _RLM_MESSAGE_HISTORY_NOTE_PYTHON
-            budget_docs = ""
-            if self.sub_llm_max_completion_tokens is not None:
-                budget_docs = (
+            root_budget_docs = ""
+            if self.root_max_completion_tokens is not None:
+                root_budget_docs = (
                     f"\nYou have a total budget of "
-                    f"{self.sub_llm_max_completion_tokens} completion tokens "
+                    f"{self.root_max_completion_tokens} completion tokens "
+                    f"for your own responses across this entire rollout.\n"
+                )
+            sub_budget_docs = ""
+            if self.sub_max_completion_tokens is not None:
+                sub_budget_docs = (
+                    f"\nYou have a total budget of "
+                    f"{self.sub_max_completion_tokens} completion tokens "
                     f"across all sub-LLM calls via llm_batch().\n"
                 )
             state["rlm_system_prompt"] = (
@@ -3211,7 +3227,8 @@ class RLMEnv(vf.StatefulToolEnv):
                 + packages_docs
                 + root_tools_docs
                 + sub_tools_docs
-                + budget_docs
+                + root_budget_docs
+                + sub_budget_docs
                 + message_history_docs
             )
             state["rlm_packages_docs"] = packages_docs
@@ -3518,6 +3535,11 @@ class RLMEnv(vf.StatefulToolEnv):
             output, state, ready_instruction=ready_instruction
         )
 
+        if self.root_max_completion_tokens is not None:
+            used = state.get("main_rlm_completion_tokens", 0)
+            budget = self.root_max_completion_tokens
+            output += f"\n[{used}/{budget} root completion tokens used]"
+
         return output
 
     async def call_bash_repl(self, code: str, state: Any) -> str:
@@ -3685,11 +3707,21 @@ class RLMEnv(vf.StatefulToolEnv):
     async def env_response(
         self, messages: Messages, state: State, **kwargs
     ) -> Messages:
-        """Override to set final_env_response when answer is ready to avoid extra model call"""
+        """Override to set final_env_response when answer is ready or root budget is exhausted."""
         tool_messages = await super().env_response(messages, state, **kwargs)
         if "final_answer" in state:
             state["final_env_response"] = tool_messages
+        elif self._is_root_budget_exhausted(state):
+            await self._ensure_final_answer(state)
+            state["final_env_response"] = tool_messages
         return tool_messages
+
+    def _is_root_budget_exhausted(self, state: State) -> bool:
+        """Check if root model completion token budget is exhausted."""
+        if self.root_max_completion_tokens is None:
+            return False
+        used = state.get("main_rlm_completion_tokens", 0)
+        return used >= self.root_max_completion_tokens
 
     async def get_model_response(  # type: ignore[override]
         self, state: State, prompt: Messages, **kwargs: Any
