@@ -1,4 +1,3 @@
-from collections.abc import Mapping
 from typing import Optional, cast
 
 from openai import AsyncOpenAI, BaseModel
@@ -14,16 +13,20 @@ from verifiers.clients.openai_chat_completions_client import (
 from verifiers.types import SamplingArgs, State
 
 
-def _has_multimodal_content(messages: OpenAIChatMessages) -> bool:
-    """Check if any message contains multimodal content (images, audio)."""
+def _has_multimodal_content(messages) -> bool:
+    """Check if any message contains multimodal content (images, audio).
+
+    Works with both plain dicts (OpenAIChatMessages) and Pydantic models
+    (Messages stored in trajectory steps) since both support .get().
+    """
     for msg in messages:
-        content = msg.get("content") if isinstance(msg, Mapping) else None
+        content = msg.get("content") if hasattr(msg, "get") else None
         if isinstance(content, list):
             for part in content:
-                if isinstance(part, Mapping) and part.get("type") in (
+                if (hasattr(part, "get") and part.get("type") in (
                     "image_url",
                     "input_audio",
-                ):
+                )):
                     return True
     return False
 
