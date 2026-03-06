@@ -211,7 +211,9 @@ class OpenAIChatCompletionsTokenClient(OpenAIChatCompletionsClient):
                 fromfile="MITO",
                 tofile="TITO",
             )
-            print("".join(diff))
+            self.logger.debug(
+                "TITO/MITO mismatch, falling back to MITO:\n%s", "".join(diff)
+            )
             return None
 
         return prompt_ids
