@@ -197,6 +197,23 @@ class OpenAIChatCompletionsTokenClient(OpenAIChatCompletionsClient):
 
         prompt_ids = prev_turn_ids + env_response_ids
 
+        if prompt_ids != full_ids_with_env_response:
+            import difflib
+
+            from transformers import AutoTokenizer
+
+            tok = AutoTokenizer.from_pretrained(state["model"])
+            tito_text = tok.decode(prompt_ids)
+            mito_text = tok.decode(full_ids_with_env_response)
+            diff = difflib.unified_diff(
+                mito_text.splitlines(keepends=True),
+                tito_text.splitlines(keepends=True),
+                fromfile="MITO",
+                tofile="TITO",
+            )
+            print("".join(diff))
+            return None
+
         return prompt_ids
 
     async def tokenize(
