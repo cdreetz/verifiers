@@ -32,6 +32,22 @@ def _has_multimodal_content(messages) -> bool:
     return False
 
 
+def _count_trailing_env_messages(messages: list) -> int:
+    """Count trailing tool/observation messages at the end of the message list."""
+    count = 0
+    for msg in reversed(messages):
+        role = msg.get("role") if hasattr(msg, "get") else None
+        if role in ("tool", "observation"):
+            count += 1
+        elif role == "user" and count == 0:
+            # A user follow-up (not a tool response) is also an env message
+            count = 1
+            break
+        else:
+            break
+    return count
+
+
 # copy from vllm/entrypoints/openai/protocol.py
 class TokenizeResponse(BaseModel):
     count: int
@@ -120,13 +136,14 @@ class OpenAIChatCompletionsTokenClient(OpenAIChatCompletionsClient):
         oai_tools: list[OpenAITool] | None,
     ) -> list[int] | None:
         """
-        Build prompt_ids (token prompt) corresponding to prompt_messages. We assume
-        that this method is called *before* making the model response from
-        prompt_messages, i.e. the previous turn's prompt and completion do not yet
-        include the environment response and next turn's model response.
+        Build prompt_ids for the next turn by stitching engine tokens with
+        bridge tokens for the environment response.
 
-        Returns None when no trajectory step has a message-level prefix match with
-        prompt_messages.
+        The engine's prev_turn_ids are preserved exactly (no retokenization),
+        guaranteeing KV cache reuse via vLLM's prefix caching. Only the bridge
+        tokens (env response + generation prompt) are new.
+
+        Returns None to fall back to MITO when stitching is not possible.
         """
 
         def normalize_for_comparison(value: Any) -> Any:
@@ -141,9 +158,10 @@ class OpenAIChatCompletionsTokenClient(OpenAIChatCompletionsClient):
                 return [normalize_for_comparison(item) for item in value]
             return value
 
-        async def find_largest_prefix_match_tokens() -> list[int] | None:
-            """Scan trajectory backwards for the step whose messages form the longest
-            prefix of prompt_messages. Returns that step's token IDs, or None."""
+        async def find_largest_prefix_match() -> tuple[list[int], bool] | None:
+            """Scan trajectory backwards for the step whose messages form the
+            longest prefix of prompt_messages. Returns (token_ids, is_truncated)
+            or None."""
             normalized_prompt_messages = normalize_for_comparison(prompt_messages)
             best_prefix_len = -1
             best_step_tokens = None
@@ -172,51 +190,87 @@ class OpenAIChatCompletionsTokenClient(OpenAIChatCompletionsClient):
 
             if best_step_tokens is None:
                 return None
-            return best_step_tokens["prompt_ids"] + best_step_tokens["completion_ids"]
+            prev_turn_ids = (
+                best_step_tokens["prompt_ids"] + best_step_tokens["completion_ids"]
+            )
+            is_truncated = best_step_tokens.get("is_truncated", False)
+            return prev_turn_ids, is_truncated
 
-        prev_turn_ids = await find_largest_prefix_match_tokens()
-        if prev_turn_ids is None:
+        match = await find_largest_prefix_match()
+        if match is None:
             return None
 
-        # Tokenize the full prompt including and excluding env response to
-        # derive just the env_response_ids
-        full_ids_with_env_response = await self.tokenize(
-            messages=prompt_messages,
-            tools=oai_tools,
-            model=state["model"],
-        )
-        full_ids_without_env_response = await self.tokenize(
-            messages=prompt_messages[:-1],  # TODO: fix multi env-response
-            tools=oai_tools,
-            model=state["model"],
-            extra_kwargs=dict(add_generation_prompt=False),
-        )
-        env_response_ids = full_ids_with_env_response[
-            len(full_ids_without_env_response) :
-        ]
+        prev_turn_ids, is_truncated = match
 
-        prompt_ids = prev_turn_ids + env_response_ids
+        # Truncated completions have no stop token — can't reliably stitch.
+        if is_truncated:
+            self.logger.debug("TITO: truncated completion, falling back to MITO")
+            return None
 
-        if prompt_ids != full_ids_with_env_response:
-            import difflib
+        # Extract the bridge tokens using a minimal dual-tokenization that
+        # avoids the problematic assistant message entirely. We tokenize:
+        #   (a) [dummy_assistant, env_messages...]  with gen=True
+        #   (b) [dummy_assistant]                   with gen=False
+        # The bridge = (a)[cut_point:] where cut_point accounts for the gap
+        # between the engine's stop token and the template's inter-turn separator.
+        #
+        # Using a dummy assistant message ensures the inter-turn separator between
+        # assistant and env response is correct, while avoiding template behaviors
+        # that depend on the assistant being the last message (e.g., Qwen3's
+        # context-dependent think block injection with add_generation_prompt=False).
+        n_env = _count_trailing_env_messages(prompt_messages)
+        if n_env <= 0:
+            return None
 
-            from transformers import AutoTokenizer
+        env_messages = list(prompt_messages[-n_env:])
+        dummy_assistant = {"role": "assistant", "content": "x"}
 
-            tok = AutoTokenizer.from_pretrained(state["model"])
-            tito_text = tok.decode(prompt_ids)
-            mito_text = tok.decode(full_ids_with_env_response)
-            diff = difflib.unified_diff(
-                mito_text.splitlines(keepends=True),
-                tito_text.splitlines(keepends=True),
-                fromfile="MITO",
-                tofile="TITO",
+        try:
+            bridge_full_ids = await self.tokenize(
+                messages=[dummy_assistant] + env_messages,
+                tools=oai_tools,
+                model=state["model"],
             )
+            bridge_base_ids = await self.tokenize(
+                messages=[dummy_assistant],
+                tools=oai_tools,
+                model=state["model"],
+                extra_kwargs=dict(add_generation_prompt=False),
+            )
+        except Exception:
+            self.logger.debug("TITO: bridge tokenization failed, falling back to MITO")
+            return None
+
+        # Verify the base is a prefix of the full (sanity check)
+        if bridge_full_ids[: len(bridge_base_ids)] != bridge_base_ids:
             self.logger.debug(
-                "TITO/MITO mismatch, falling back to MITO:\n%s", "".join(diff)
+                "TITO: bridge prefix property broken, falling back to MITO"
             )
             return None
 
-        return prompt_ids
+        # The base ends at the template-rendered stop token + inter-turn separator.
+        # The engine's prev_turn_ids ends at just the stop token.
+        # The gap = tokens the template adds after the stop token (e.g., \n for Qwen).
+        # We include the gap in the bridge so it covers everything after the stop token.
+        #
+        # Find the gap by locating the stop token in bridge_base_ids.
+        # The stop token is the last completion_ids token from the matched step.
+        stop_token_id = prev_turn_ids[-1]
+        gap = 0
+        for i in range(len(bridge_base_ids) - 1, -1, -1):
+            if bridge_base_ids[i] == stop_token_id:
+                gap = len(bridge_base_ids) - i - 1
+                break
+
+        bridge_ids = bridge_full_ids[len(bridge_base_ids) - gap :]
+
+        # Handle stop tokens that double as role markers (e.g., GLM's <|observation|>):
+        # if the bridge starts with the stop token that's already at the end of
+        # prev_turn_ids, skip it to avoid duplication.
+        if bridge_ids and bridge_ids[0] == stop_token_id:
+            bridge_ids = bridge_ids[1:]
+
+        return prev_turn_ids + list(bridge_ids)
 
     async def tokenize(
         self,
