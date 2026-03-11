@@ -164,7 +164,7 @@ class OpenAIChatCompletionsTokenClient(OpenAIChatCompletionsClient):
             or None."""
             normalized_prompt_messages = normalize_for_comparison(prompt_messages)
             best_prefix_len = -1
-            best_step_tokens = None
+            best_step = None
             for step in reversed(state["trajectory"]):
                 step_tokens = step["tokens"]
                 if step_tokens is None:
@@ -184,16 +184,22 @@ class OpenAIChatCompletionsTokenClient(OpenAIChatCompletionsClient):
                 if normalized_prompt_messages[:prefix_len] != normalized_step_messages:
                     continue
                 best_prefix_len = prefix_len
-                best_step_tokens = step_tokens
+                best_step = step
                 if best_prefix_len == len(normalized_prompt_messages):
                     break
 
-            if best_step_tokens is None:
+            if best_step is None:
                 return None
+            best_step_tokens = best_step["tokens"]
             prev_turn_ids = (
                 best_step_tokens["prompt_ids"] + best_step_tokens["completion_ids"]
             )
-            is_truncated = best_step_tokens.get("is_truncated", False)
+            # Check both seq_len overflow (from token parsing) and max_tokens
+            # truncation (from vLLM finish_reason="length").
+            is_truncated = best_step_tokens.get("is_truncated", False) or (
+                best_step.get("response") is not None
+                and getattr(best_step["response"].message, "is_truncated", False)
+            )
             return prev_turn_ids, is_truncated
 
         match = await find_largest_prefix_match()
