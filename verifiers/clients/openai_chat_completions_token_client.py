@@ -6,6 +6,7 @@ from openai.types.chat import ChatCompletion
 
 from verifiers.clients.openai_chat_completions_client import (
     OpenAIChatCompletionsClient,
+    OpenAIChatMessage,
     OpenAIChatMessages,
     OpenAIChatResponse,
     OpenAITool,
@@ -227,8 +228,8 @@ class OpenAIChatCompletionsTokenClient(OpenAIChatCompletionsClient):
         if n_env <= 0:
             return None
 
-        env_messages = list(prompt_messages[-n_env:])
-        dummy_assistant = {"role": "assistant", "content": "x"}
+        env_messages: OpenAIChatMessages = list(prompt_messages[-n_env:])
+        dummy_assistant: OpenAIChatMessage = {"role": "assistant", "content": "x"}
 
         try:
             bridge_full_ids = await self.tokenize(
