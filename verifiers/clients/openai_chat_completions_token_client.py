@@ -33,19 +33,19 @@ def _has_multimodal_content(messages) -> bool:
     return False
 
 
-def _count_trailing_env_messages(messages: list) -> int:
-    """Count trailing tool/observation messages at the end of the message list."""
-    count = 0
-    for msg in reversed(messages):
-        role = msg.get("role") if hasattr(msg, "get") else None
-        if role in ("tool", "observation"):
-            count += 1
-        elif role == "user" and count == 0:
-            # A user follow-up (not a tool response) is also an env message
-            count = 1
-        else:
-            break
-    return count
+def _get_role(msg) -> str | None:
+    return msg.get("role") if hasattr(msg, "get") else getattr(msg, "role", None)
+
+
+def _is_valid_env_tail(messages: list) -> bool:
+    """Validate that messages follow env response patterns:
+    all tool messages, with optionally a single user message last."""
+    if not messages:
+        return False
+    for msg in messages[:-1]:
+        if _get_role(msg) != "tool":
+            return False
+    return _get_role(messages[-1]) in ("tool", "user")
 
 
 # copy from vllm/entrypoints/openai/protocol.py
@@ -158,10 +158,12 @@ class OpenAIChatCompletionsTokenClient(OpenAIChatCompletionsClient):
                 return [normalize_for_comparison(item) for item in value]
             return value
 
-        async def find_largest_prefix_match() -> tuple[list[int], bool] | None:
+        async def find_largest_prefix_match() -> (
+            tuple[list[int], bool, int] | None
+        ):
             """Scan trajectory backwards for the step whose messages form the
-            longest prefix of prompt_messages. Returns (token_ids, is_truncated)
-            or None."""
+            longest prefix of prompt_messages. Returns
+            (token_ids, is_truncated, prefix_len) or None."""
             normalized_prompt_messages = normalize_for_comparison(prompt_messages)
             best_prefix_len = -1
             best_step = None
@@ -200,17 +202,22 @@ class OpenAIChatCompletionsTokenClient(OpenAIChatCompletionsClient):
                 best_step.get("response") is not None
                 and getattr(best_step["response"].message, "is_truncated", False)
             )
-            return prev_turn_ids, is_truncated
+            return prev_turn_ids, is_truncated, best_prefix_len
 
         match = await find_largest_prefix_match()
         if match is None:
             return None
 
-        prev_turn_ids, is_truncated = match
+        prev_turn_ids, is_truncated, prefix_len = match
 
         # Truncated completions have no stop token — can't reliably stitch.
         if is_truncated:
             self.logger.debug("TITO: truncated completion, falling back to MITO")
+            return None
+
+        # The env messages are everything after the prefix match.
+        env_messages: OpenAIChatMessages = list(prompt_messages[prefix_len:])
+        if not _is_valid_env_tail(env_messages):
             return None
 
         # Extract the bridge tokens using a minimal dual-tokenization that
@@ -224,11 +231,6 @@ class OpenAIChatCompletionsTokenClient(OpenAIChatCompletionsClient):
         # assistant and env response is correct, while avoiding template behaviors
         # that depend on the assistant being the last message (e.g., Qwen3's
         # context-dependent think block injection with add_generation_prompt=False).
-        n_env = _count_trailing_env_messages(prompt_messages)
-        if n_env <= 0:
-            return None
-
-        env_messages: OpenAIChatMessages = list(prompt_messages[-n_env:])
         dummy_assistant: OpenAIChatMessage = {"role": "assistant", "content": "x"}
 
         try:
