@@ -158,9 +158,7 @@ class OpenAIChatCompletionsTokenClient(OpenAIChatCompletionsClient):
                 return [normalize_for_comparison(item) for item in value]
             return value
 
-        async def find_largest_prefix_match() -> (
-            tuple[list[int], bool, int] | None
-        ):
+        async def find_largest_prefix_match() -> tuple[list[int], bool, int] | None:
             """Scan trajectory backwards for the step whose messages form the
             longest prefix of prompt_messages. Returns
             (token_ids, is_truncated, prefix_len) or None."""
