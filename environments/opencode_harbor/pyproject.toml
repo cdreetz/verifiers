@@ -6,17 +6,20 @@ tags = ["eval", "cli_agent"]
 version = "0.1.1"
 requires-python = ">=3.10"
 dependencies = [
-    "verifiers>=0.1.10.dev2",
+    "verifiers",
     "prime-sandboxes>=0.2.10",
     "tomli>=2.3.0",
 ]
+
+[tool.uv.sources]
+verifiers = { path = "../..", editable = true }
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build]
-include = ["opencode_harbor.py", "pyproject.toml", "tasks/**/*"] 
+include = ["opencode_harbor.py", "opencode_harbor_experimental.py", "pyproject.toml", "tasks/**/*"] 
 
 [tool.verifiers.eval]
 num_examples = 5

@@ -60,6 +60,8 @@ __all__ = [
     "GymEnv",
     "CliAgentEnv",
     "HarborEnv",
+    "NewCliAgentEnv",
+    "NewHarborEnv",
     "MCPEnv",
     "BrowserEnv",
     "OpenEnvEnv",
@@ -68,6 +70,7 @@ __all__ = [
     "SingleTurnEnv",
     "PythonEnv",
     "SandboxEnv",
+    "NewSandboxEnv",
     "StatefulToolEnv",
     "ToolEnv",
     "EnvGroup",
@@ -92,6 +95,13 @@ __all__ = [
     "teardown",
     "ensure_keys",
     "MissingKeyError",
+    # Resource managers
+    "ResourceManager",
+    "ResourceState",
+    "ManagedResource",
+    "ResourceError",
+    "SandboxManager",
+    "ManagedSandbox",
 ]
 
 _LAZY_IMPORTS = {
@@ -105,15 +115,25 @@ _LAZY_IMPORTS = {
     "lora_defaults": "verifiers.rl.trainer:lora_defaults",
     "MathRubric": "verifiers.rubrics.math_rubric:MathRubric",
     "SandboxEnv": "verifiers.envs.sandbox_env:SandboxEnv",
+    "NewSandboxEnv": "verifiers.envs.experimental.new_sandbox_env:NewSandboxEnv",
     "PythonEnv": "verifiers.envs.python_env:PythonEnv",
     "GymEnv": "verifiers.envs.experimental.gym_env:GymEnv",
     "CliAgentEnv": "verifiers.envs.experimental.cli_agent_env:CliAgentEnv",
     "HarborEnv": "verifiers.envs.experimental.harbor_env:HarborEnv",
+    "NewCliAgentEnv": "verifiers.envs.experimental.new_cli_agent_env:NewCliAgentEnv",
+    "NewHarborEnv": "verifiers.envs.experimental.new_harbor_env:NewHarborEnv",
     "MCPEnv": "verifiers.envs.experimental.mcp_env:MCPEnv",
     "ReasoningGymEnv": "verifiers.envs.integrations.reasoninggym_env:ReasoningGymEnv",
     "TextArenaEnv": "verifiers.envs.integrations.textarena_env:TextArenaEnv",
     "BrowserEnv": "verifiers.envs.integrations.browser_env:BrowserEnv",
     "OpenEnvEnv": "verifiers.envs.integrations.openenv_env:OpenEnvEnv",
+    # Resource managers (experimental)
+    "ResourceManager": "verifiers.envs.experimental.managers.resource_manager:ResourceManager",
+    "ResourceState": "verifiers.envs.experimental.managers.resource_manager:ResourceState",
+    "ManagedResource": "verifiers.envs.experimental.managers.resource_manager:ManagedResource",
+    "ResourceError": "verifiers.envs.experimental.managers.resource_manager:ResourceError",
+    "SandboxManager": "verifiers.envs.experimental.managers.sandbox_manager:SandboxManager",
+    "ManagedSandbox": "verifiers.envs.experimental.managers.sandbox_manager:ManagedSandbox",
 }
 
 
@@ -134,7 +154,20 @@ if TYPE_CHECKING:
     from .envs.experimental.cli_agent_env import CliAgentEnv  # noqa: F401
     from .envs.experimental.gym_env import GymEnv  # noqa: F401
     from .envs.experimental.harbor_env import HarborEnv  # noqa: F401
+    from .envs.experimental.new_cli_agent_env import NewCliAgentEnv  # noqa: F401
+    from .envs.experimental.new_harbor_env import NewHarborEnv  # noqa: F401
+    from .envs.experimental.new_sandbox_env import NewSandboxEnv  # noqa: F401
     from .envs.experimental.mcp_env import MCPEnv  # noqa: F401
+    from .envs.experimental.managers.resource_manager import (  # noqa: F401
+        ManagedResource,
+        ResourceError,
+        ResourceManager,
+        ResourceState,
+    )
+    from .envs.experimental.managers.sandbox_manager import (  # noqa: F401
+        ManagedSandbox,
+        SandboxManager,
+    )
     from .envs.integrations.browser_env import BrowserEnv  # noqa: F401
     from .envs.integrations.openenv_env import OpenEnvEnv  # noqa: F401
     from .envs.integrations.reasoninggym_env import ReasoningGymEnv  # noqa: F401

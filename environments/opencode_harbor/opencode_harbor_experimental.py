@@ -1,11 +1,19 @@
-"""OpenCode Harbor environment using the original HarborEnv."""
+"""OpenCode Harbor environment using the experimental NewHarborEnv with resource management.
+
+This version uses the new SandboxManager for:
+- Atomic resource tracking (no sandbox leakage)
+- Better error tracking (errors associated with rollouts)
+- Lifecycle observability
+
+To compare with the original, run both and check the sandbox lifecycle metrics.
+"""
 
 import logging
 from pathlib import Path
 
-from verifiers.envs.experimental.harbor_env import HarborEnv
+from verifiers.envs.experimental.new_harbor_env import NewHarborEnv
 
-logger = logging.getLogger("verifiers.envs.OpenCodeHarborEnv")
+logger = logging.getLogger("verifiers.envs.OpenCodeHarborEnvExperimental")
 
 
 def _build_run_command(agent_workdir: str) -> str:
@@ -60,8 +68,12 @@ opencode run "$(cat /task/instruction.md)" 2>&1 | tee /logs/agent/opencode.txt
 """
 
 
-class OpenCodeHarborEnv(HarborEnv):
-    """OpenCode agent environment using the original HarborEnv (CliAgentEnv)."""
+class OpenCodeHarborEnvExperimental(NewHarborEnv):
+    """OpenCode agent environment using the experimental NewHarborEnv (with SandboxManager).
+
+    This version provides better resource tracking and error attribution compared
+    to the original OpenCodeHarborEnv.
+    """
 
     def __init__(
         self,
@@ -92,8 +104,8 @@ def load_environment(
     disk_size_gb: int = 10,
     timeout_minutes: int = 120,
     max_turns: int = 4,
-) -> OpenCodeHarborEnv:
-    return OpenCodeHarborEnv(
+) -> OpenCodeHarborEnvExperimental:
+    return OpenCodeHarborEnvExperimental(
         dataset_path=dataset_path,
         tasks=tasks,
         agent_workdir=agent_workdir,

@@ -27,6 +27,8 @@ try:
         SandboxClient,
     )
     from prime_sandboxes.core import APIClient
+    from verifiers.envs.experimental.managers.sandbox_manager import SandboxManager, ManagedSandbox
+    from verifiers.envs.experimental.managers.resource_manager import ResourceState
 
     SANDBOX_AVAILABLE = True
 except ImportError:
@@ -35,6 +37,9 @@ except ImportError:
     CreateSandboxRequest = None  # type: ignore[misc, assignment]
     SandboxClient = None  # type: ignore[misc, assignment]
     APIClient = None  # type: ignore[misc, assignment]
+    SandboxManager = None  # type: ignore[misc, assignment]
+    ManagedSandbox = None  # type: ignore[misc, assignment]
+    ResourceState = None  # type: ignore[misc, assignment]
 
 
 class CUAMode:
@@ -162,11 +167,12 @@ class CUAMode:
         self.server_ready_timeout = server_ready_timeout
         self.server_ready_poll_interval = server_ready_poll_interval
         self.sandbox_timeout_per_command_seconds = sandbox_timeout_per_command_seconds
-        self.active_sandboxes: set[str] = set()
-        self._sandbox_client: AsyncSandboxClient | None = None
         self.use_binary = use_binary
         self.use_prebuilt_image = use_prebuilt_image
         self.prebuilt_image = prebuilt_image
+
+        # SandboxManager for proper lifecycle tracking (initialized later with request)
+        self.sandbox_manager: SandboxManager | None = None
 
         # Get template path for binary builds
         self._template_path = (
@@ -177,7 +183,7 @@ class CUAMode:
             / "cua"
         )
 
-        # Initialize sandbox request if in sandbox mode
+        # Initialize sandbox request and manager if in sandbox mode
         self._sandbox_request = None
         if execution_mode == "sandbox" and SANDBOX_AVAILABLE:
             if use_prebuilt_image:
@@ -213,6 +219,19 @@ class CUAMode:
                     timeout_minutes=sandbox_timeout_minutes,
                     environment_vars={},
                 )
+
+            # Initialize SandboxManager with the request
+            self.sandbox_manager = SandboxManager(
+                default_request=self._sandbox_request,
+                timeout_per_command=sandbox_timeout_per_command_seconds,
+                max_retries=max_retries,
+                base_delay=base_delay,
+                backoff_factor=backoff_factor,
+                max_backoff_seconds=max_backoff_seconds,
+                jitter=jitter,
+                health_check_interval=30.0,  # Less frequent for CUA sandboxes
+                enable_health_monitoring=False,  # Disable for CUA - server health checked differently
+            )
 
     def register_tools(self, env) -> None:
         """Register CUA mode tools with the environment."""
@@ -353,50 +372,19 @@ class CUAMode:
                 return {"success": False, "error": error_text, "state": {}}
             return await resp.json()
 
-    # ==================== Sandbox Client Methods ====================
-
-    async def _get_sandbox_client(self) -> AsyncSandboxClient:
-        """Get or create the sandbox client."""
-        if self._sandbox_client is None:
-            self._sandbox_client = AsyncSandboxClient()
-        return self._sandbox_client
-
-    async def _create_sandbox(self) -> str:
-        """Create a new sandbox and return its ID."""
-        client = await self._get_sandbox_client()
-        sandbox = await client.create(self._sandbox_request.model_copy())  # type: ignore[union-attr]
-        self.active_sandboxes.add(sandbox.id)
-        if self.logger:
-            self.logger.debug(f"Created sandbox {sandbox.id}")
-        return sandbox.id
-
-    async def _wait_for_sandbox_ready(self, sandbox_id: str) -> None:
-        """Wait for sandbox to be ready."""
-        client = await self._get_sandbox_client()
-        await client.wait_for_creation(sandbox_id)
-        if self.logger:
-            self.logger.debug(f"Sandbox {sandbox_id} is ready")
-
-    async def _delete_sandbox(self, sandbox_id: str) -> None:
-        """Delete a sandbox."""
-        client = await self._get_sandbox_client()
-        await client.delete(sandbox_id)
-        self.active_sandboxes.discard(sandbox_id)
-        if self.logger:
-            self.logger.debug(f"Deleted sandbox {sandbox_id}")
+    # ==================== Sandbox Command Execution ====================
 
     async def _execute_sandbox_command(
         self, sandbox_id: str, command: str, timeout: int | None = None
     ) -> str:
-        """Execute a command in the sandbox and return stdout."""
-        client = await self._get_sandbox_client()
-        result = await client.execute_command(
+        """Execute a command in the sandbox and return output."""
+        if self.sandbox_manager is None:
+            raise RuntimeError("SandboxManager not initialized")
+        return await self.sandbox_manager.execute_command(
             sandbox_id,
             command,
-            working_dir=None,
             timeout=timeout or self.sandbox_timeout_per_command_seconds,
         )
-        return result.stdout if hasattr(result, "stdout") else str(result)
 
     # ==================== Sandbox Setup Methods ====================
 
@@ -463,7 +451,11 @@ class CUAMode:
                 f"CUA server template not found at {self._template_path}"
             )
 
-        client = await self._get_sandbox_client()
+        if self.sandbox_manager is None:
+            raise RuntimeError("SandboxManager not initialized")
+
+        # Access the sandbox client from the manager for file upload
+        client = self.sandbox_manager.client
 
         with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp_file:
             tar_path = Path(tmp_file.name)
@@ -816,26 +808,34 @@ class CUAMode:
             state["session_id"] = session_id
             state["browser_state"] = result.get("state", {})
         else:
-            # Sandbox mode: create sandbox, set up server, create session
+            # Sandbox mode: create sandbox via manager, set up server, create session
+            if self.sandbox_manager is None:
+                raise RuntimeError("SandboxManager not initialized for sandbox mode")
+
+            # Get rollout_id for tracking
+            rollout_id = state.get("rollout_id") or state.get("trajectory_id")
+
             if self.use_prebuilt_image:
                 if self.logger:
                     self.logger.debug(f"Using prebuilt image: {self.prebuilt_image}")
 
-                async for attempt in self.retrying:  # type: ignore[union-attr]
-                    with attempt:
-                        sandbox_id = await self._create_sandbox()
-                await self._wait_for_sandbox_ready(sandbox_id)
+                # SandboxManager handles retries and cleanup on failure
+                sandbox = await self.sandbox_manager.acquire(rollout_id=rollout_id)
+                sandbox_id = sandbox.id
+                await self.sandbox_manager.wait_for_ready(sandbox_id)
                 state["cua_sandbox_id"] = sandbox_id
+                state["cua_sandbox"] = sandbox  # Store reference for error checking
                 await self._wait_for_server(sandbox_id)
             else:
                 if self.use_binary:
                     await self._ensure_binary_exists()
 
-                async for attempt in self.retrying:  # type: ignore[union-attr]
-                    with attempt:
-                        sandbox_id = await self._create_sandbox()
-                await self._wait_for_sandbox_ready(sandbox_id)
+                # SandboxManager handles retries and cleanup on failure
+                sandbox = await self.sandbox_manager.acquire(rollout_id=rollout_id)
+                sandbox_id = sandbox.id
+                await self.sandbox_manager.wait_for_ready(sandbox_id)
                 state["cua_sandbox_id"] = sandbox_id
+                state["cua_sandbox"] = sandbox  # Store reference for error checking
                 await self._upload_server_files(sandbox_id)
                 await self._start_server(sandbox_id)
                 await self._wait_for_server(sandbox_id)
@@ -892,7 +892,7 @@ class CUAMode:
                             f"Failed to destroy session {session_id}: {e}"
                         )
         else:
-            # Sandbox mode: destroy session and sandbox
+            # Sandbox mode: destroy session and sandbox via manager
             sandbox_id = state.get("cua_sandbox_id")
 
             if session_id and sandbox_id:
@@ -908,16 +908,35 @@ class CUAMode:
                             f"Failed to destroy session {session_id}: {e}"
                         )
 
-            if sandbox_id:
+            # Release sandbox via manager (handles retries and error tracking)
+            if sandbox_id and self.sandbox_manager is not None:
                 try:
-                    async for attempt in self.retrying:  # type: ignore[union-attr]
-                        with attempt:
-                            await self._delete_sandbox(sandbox_id)
+                    await self.sandbox_manager.release(sandbox_id)
                 except Exception as e:
                     if self.logger:
                         self.logger.warning(
-                            f"Failed to delete sandbox {sandbox_id}: {e}"
+                            f"Failed to release sandbox {sandbox_id}: {e}"
                         )
+
+    # ==================== Sandbox Summary Methods (delegated to manager) ====================
+
+    def get_sandbox_summary(self) -> dict[str, Any]:
+        """Get summary of sandbox lifecycle metrics."""
+        if self.sandbox_manager is None:
+            return {"error": "No sandbox manager (local mode or not initialized)"}
+        return self.sandbox_manager.get_summary()
+
+    def print_sandbox_summary(self) -> None:
+        """Print a summary of sandbox lifecycle metrics."""
+        if self.sandbox_manager is None:
+            return
+        self.sandbox_manager.print_summary(title="CUA SANDBOX SUMMARY")
+
+    def get_sandbox_errors_for_rollout(self, rollout_id: str) -> list:
+        """Get sandbox errors associated with a specific rollout."""
+        if self.sandbox_manager is None:
+            return []
+        return self.sandbox_manager.get_errors_for_rollout(rollout_id)
 
     async def teardown(self, max_concurrent: int = 50) -> None:
         """Clean up all resources on environment teardown."""
@@ -960,42 +979,22 @@ class CUAMode:
             except RuntimeError:
                 pass
         else:
-            # Sandbox mode: delete all remaining sandboxes
-            if len(self.active_sandboxes) == 0:
+            # Sandbox mode: release all sandboxes via manager
+            if self.sandbox_manager is None:
                 return
 
-            sandbox_ids = list(self.active_sandboxes)
+            # Print sandbox summary before cleanup
+            self.print_sandbox_summary()
 
-            if self.logger:
-                self.logger.info(f"Deleting {len(sandbox_ids)} remaining sandboxes")
-
+            # Release all sandboxes via manager (handles bulk delete efficiently)
             try:
-                loop = asyncio.get_running_loop()
-                if loop.is_closed():
-                    return
-            except RuntimeError:
-                return
+                await self.sandbox_manager.release_all()
+            except Exception as e:
+                if self.logger:
+                    self.logger.warning(f"Error releasing sandboxes: {e}")
 
-            semaphore = asyncio.Semaphore(max_concurrent)
-
-            async def _delete_sandbox_with_semaphore(sandbox_id: str):
-                async with semaphore:
-                    try:
-                        await self._delete_sandbox(sandbox_id)
-                        if self.logger:
-                            self.logger.debug(f"Deleted sandbox {sandbox_id}")
-                    except Exception as e:
-                        if self.logger:
-                            self.logger.warning(
-                                f"Failed to delete sandbox {sandbox_id}: {e}"
-                            )
-
-            try:
-                await asyncio.gather(
-                    *[_delete_sandbox_with_semaphore(sid) for sid in sandbox_ids]
-                )
-            except RuntimeError:
-                pass
+            # Teardown the sandbox client thread pool
+            self.sandbox_manager.teardown()
 
     # ==================== Browser Tool Methods ====================
 
