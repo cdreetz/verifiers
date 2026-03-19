@@ -74,7 +74,7 @@ class NewCliAgentEnv(vf.MultiTurnEnv):
         labels: list[str] | None = None,
         # Resource manager options
         max_retries: int = 5,
-        base_delay: float = 0.5,
+        retry_delay: float = 0.5,
         enable_health_monitoring: bool = False,
         **kwargs,
     ):
@@ -125,7 +125,7 @@ class NewCliAgentEnv(vf.MultiTurnEnv):
             default_request=self._default_request,
             timeout_per_command=300,  # Longer timeout for agent commands
             max_retries=max_retries,
-            base_delay=base_delay,
+            retry_delay=retry_delay,
             enable_health_monitoring=enable_health_monitoring,
         )
 
