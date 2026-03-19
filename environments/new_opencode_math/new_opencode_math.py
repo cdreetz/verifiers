@@ -8,9 +8,11 @@ import logging
 from typing import Any
 
 from datasets import load_dataset, Dataset
+from prime_sandboxes import AsyncSandboxClient
 
 import verifiers as vf
 from verifiers.envs.experimental.new_cli_agent_env import NewCliAgentEnv
+from verifiers.types import State
 
 logger = logging.getLogger("verifiers.envs.NewOpenCodeMathEnv")
 
@@ -20,14 +22,19 @@ def _build_run_command(agent_workdir: str) -> str:
     return f"""
 set -e
 
-echo "Starting OpenCode agent..."
+echo "=== Starting OpenCode agent ==="
 echo "Base URL: $OPENAI_BASE_URL"
+echo "Instruction file: /task/instruction.txt"
 
 apt-get update && apt-get install -y curl
 
 # Install OpenCode
+echo "Installing OpenCode..."
 curl -fsSL https://opencode.ai/install | bash
 export PATH="$HOME/.opencode/bin:$PATH"
+
+echo "OpenCode installed, checking version..."
+opencode --version || echo "opencode not found in PATH"
 
 # Create opencode config directory
 mkdir -p ~/.config/opencode
@@ -60,11 +67,21 @@ cat > ~/.config/opencode/opencode.json << EOFCONFIG
 }}
 EOFCONFIG
 
+echo "OpenCode config:"
+cat ~/.config/opencode/opencode.json
+
 mkdir -p /logs/agent
 
-# Run OpenCode with the instruction
+# Read instruction from file
+echo "=== Instruction ==="
+cat /task/instruction.txt
+echo "=== End Instruction ==="
+
+# Run OpenCode with the instruction from file
 cd {agent_workdir}
-opencode run "$OPENCODE_INSTRUCTION" 2>&1 | tee /logs/agent/opencode.txt
+echo "Running opencode..."
+opencode run "$(cat /task/instruction.txt)" 2>&1 | tee /logs/agent/opencode.txt
+echo "OpenCode exit code: $?"
 """
 
 
@@ -89,7 +106,7 @@ class NewOpenCodeMathEnv(NewCliAgentEnv):
         dataset_subset: str = DEFAULT_DATASET_SUBSET,
         dataset_split: str = DEFAULT_DATASET_SPLIT,
         instruction_prompt: str = DEFAULT_INSTRUCTION_PROMPT,
-        question_key: str = "problem",
+        question_key: str = "question",
         answer_key: str = "answer",
         agent_workdir: str = DEFAULT_AGENT_WORKDIR,
         rubric: vf.Rubric | None = None,
@@ -161,13 +178,35 @@ class NewOpenCodeMathEnv(NewCliAgentEnv):
         env_vars["OPENCODE_INSTRUCTION"] = instruction
         return env_vars
 
+    async def post_sandbox_setup(
+        self, state: State, sandbox_client: AsyncSandboxClient
+    ) -> None:
+        """Write the instruction file to the sandbox before running the agent."""
+        sandbox_id = state["sandbox_id"]
+
+        # Extract instruction from the prompt
+        prompt = state.get("prompt", [])
+        if prompt and isinstance(prompt, list) and len(prompt) > 0:
+            instruction = prompt[0].get("content", "")
+        else:
+            instruction = str(prompt)
+
+        # Create /task directory and write instruction file
+        await sandbox_client.run_command(sandbox_id, "mkdir -p /task")
+
+        # Write instruction to file using heredoc (single-quoted delimiter prevents expansion)
+        write_cmd = f"cat > /task/instruction.txt << 'INSTRUCTION_EOF'\n{instruction}\nINSTRUCTION_EOF"
+        await sandbox_client.run_command(sandbox_id, write_cmd)
+
+        logger.debug(f"Wrote instruction to /task/instruction.txt ({len(instruction)} chars)")
+
 
 def load_environment(
     dataset_name: str = NewOpenCodeMathEnv.DEFAULT_DATASET_NAME,
     dataset_subset: str = NewOpenCodeMathEnv.DEFAULT_DATASET_SUBSET,
     dataset_split: str = NewOpenCodeMathEnv.DEFAULT_DATASET_SPLIT,
     instruction_prompt: str = NewOpenCodeMathEnv.DEFAULT_INSTRUCTION_PROMPT,
-    question_key: str = "problem",
+    question_key: str = "question",
     answer_key: str = "answer",
     agent_workdir: str = NewOpenCodeMathEnv.DEFAULT_AGENT_WORKDIR,
     docker_image: str = "python:3.11-slim",
