@@ -24,13 +24,22 @@ set -e
 
 echo "=== Starting OpenCode agent ==="
 echo "Base URL: $OPENAI_BASE_URL"
-echo "Instruction file: /task/instruction.txt"
+echo "Instruction file: /task/prompt.txt"
 
 apt-get update && apt-get install -y curl
 
-# Install OpenCode
-echo "Installing OpenCode..."
-curl -fsSL https://opencode.ai/install | bash
+# Install OpenCode with retries
+for install_attempt in 1 2 3; do
+    if curl -fsSL https://opencode.ai/install | bash -s -- --version v1.2.15; then
+        break
+    fi
+    if [ "$install_attempt" -eq 3 ]; then
+        echo "OpenCode installation failed after 3 attempts" >&2
+        exit 1
+    fi
+    echo "OpenCode install attempt $install_attempt/3 failed, retrying in 5s..." >&2
+    sleep 5
+done
 export PATH="$HOME/.opencode/bin:$PATH"
 
 echo "OpenCode installed, checking version..."
@@ -39,22 +48,24 @@ opencode --version || echo "opencode not found in PATH"
 # Create opencode config directory
 mkdir -p ~/.config/opencode
 
-# Create opencode.json config with intercepted provider
+SCHEMA_DOLLAR='$'
+
+# Create opencode.json config with intercepted provider using env var substitution
 cat > ~/.config/opencode/opencode.json << EOFCONFIG
 {{
-  "\\$schema": "https://opencode.ai/config.json",
+  "${{SCHEMA_DOLLAR}}schema": "https://opencode.ai/config.json",
   "provider": {{
-    "intercepted": {{
+    "${{OPENAI_MODEL%%/*}}": {{
       "npm": "@ai-sdk/openai-compatible",
-      "name": "Intercepted",
+      "name": "${{OPENAI_MODEL%%/*}}",
       "options": {{
         "baseURL": "$OPENAI_BASE_URL",
         "apiKey": "intercepted",
         "timeout": 600000
       }},
       "models": {{
-        "model": {{
-          "name": "Intercepted Model",
+        "${{OPENAI_MODEL##*/}}": {{
+          "name": "${{OPENAI_MODEL##*/}}",
           "modalities": {{
             "input": ["text", "image"],
             "output": ["text"]
@@ -63,7 +74,8 @@ cat > ~/.config/opencode/opencode.json << EOFCONFIG
       }}
     }}
   }},
-  "model": "intercepted/model"
+  "model": "$OPENAI_MODEL",
+  "compaction": {{"auto": false, "prune": false}}
 }}
 EOFCONFIG
 
@@ -74,13 +86,13 @@ mkdir -p /logs/agent
 
 # Read instruction from file
 echo "=== Instruction ==="
-cat /task/instruction.txt
+cat /task/prompt.txt
 echo "=== End Instruction ==="
 
-# Run OpenCode with the instruction from file
+# Run OpenCode with instruction piped via stdin (like the original)
 cd {agent_workdir}
 echo "Running opencode..."
-opencode run "$(cat /task/instruction.txt)" 2>&1 | tee /logs/agent/opencode.txt
+cat /task/prompt.txt | opencode run 2>&1 | tee /logs/agent/opencode.txt
 echo "OpenCode exit code: $?"
 """
 
@@ -181,24 +193,26 @@ class NewOpenCodeMathEnv(NewCliAgentEnv):
     async def post_sandbox_setup(
         self, state: State, sandbox_client: AsyncSandboxClient
     ) -> None:
-        """Write the instruction file to the sandbox before running the agent."""
+        """Write the prompt file to the sandbox before running the agent."""
         sandbox_id = state["sandbox_id"]
 
-        # Extract instruction from the prompt
+        # Extract prompt content (last user message)
         prompt = state.get("prompt", [])
         if prompt and isinstance(prompt, list) and len(prompt) > 0:
-            instruction = prompt[0].get("content", "")
+            prompt_content = prompt[-1].get("content", "")
         else:
-            instruction = str(prompt)
+            prompt_content = str(prompt)
 
-        # Create /task directory and write instruction file
-        await sandbox_client.run_command(sandbox_id, "mkdir -p /task")
+        # Create working directories
+        await sandbox_client.execute_command(
+            sandbox_id, f"mkdir -p /task {self.agent_workdir}"
+        )
 
-        # Write instruction to file using heredoc (single-quoted delimiter prevents expansion)
-        write_cmd = f"cat > /task/instruction.txt << 'INSTRUCTION_EOF'\n{instruction}\nINSTRUCTION_EOF"
-        await sandbox_client.run_command(sandbox_id, write_cmd)
+        # Write prompt to file using heredoc (single-quoted delimiter prevents expansion)
+        write_cmd = f"cat > /task/prompt.txt << 'PROMPT_EOF'\n{prompt_content}\nPROMPT_EOF"
+        await sandbox_client.execute_command(sandbox_id, write_cmd)
 
-        logger.debug(f"Wrote instruction to /task/instruction.txt ({len(instruction)} chars)")
+        logger.debug(f"Wrote prompt to /task/prompt.txt ({len(prompt_content)} chars)")
 
 
 def load_environment(
