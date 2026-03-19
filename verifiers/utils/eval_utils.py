@@ -10,7 +10,7 @@ import threading
 import time
 from collections import Counter, defaultdict
 from collections.abc import Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Callable, cast
 
@@ -35,9 +35,14 @@ from verifiers.types import (
 )
 from verifiers.utils.async_utils import EventLoopLagMonitor
 from verifiers.utils.import_utils import load_toml
-from verifiers.utils.logging_utils import print_prompt_completions_sample, print_time
+from verifiers.utils.logging_utils import (
+    log_level,
+    print_prompt_completions_sample,
+    print_time,
+)
 from verifiers.utils.metric_utils import compute_pass_at_k
 from verifiers.utils.path_utils import get_eval_results_path
+from verifiers.utils.thread_utils import recommended_max_workers
 
 logger = logging.getLogger(__name__)
 
@@ -718,7 +723,11 @@ async def run_evaluation(
     on_log: LogCallback | None = None,
 ) -> GenerateOutputs:
     # load environment
-    vf_env = vf.load_environment(env_id=config.env_id, **config.env_args)
+    maybe_suppress_logs = (
+        log_level(logging.CRITICAL) if not config.disable_env_server else nullcontext()
+    )
+    with maybe_suppress_logs:
+        vf_env = vf.load_environment(env_id=config.env_id, **config.env_args)
 
     # set extra environment kwargs
     if config.extra_env_kwargs:
@@ -729,16 +738,29 @@ async def run_evaluation(
 
     try:
         if not config.disable_env_server:
+            extra_env_kwargs = dict(config.extra_env_kwargs)
+            if "max_workers" not in extra_env_kwargs:
+                if config.max_concurrent <= 0:
+                    concurrency = config.num_examples * config.rollouts_per_example
+                else:
+                    concurrency = config.max_concurrent
+
+                max_workers = recommended_max_workers(concurrency)
+                logger.info(
+                    f"Automatically determined {max_workers=} for {concurrency=}"
+                )
+                extra_env_kwargs["max_workers"] = max_workers
+
             if config.debug:
                 await vf_env.start_server(
-                    extra_env_kwargs=config.extra_env_kwargs,
+                    extra_env_kwargs=extra_env_kwargs,
                     log_level=get_log_level(config.verbose),
                 )
             else:
                 log_file = results_path / "eval.log"
                 log_file.parent.mkdir(parents=True, exist_ok=True)
                 await vf_env.start_server(
-                    extra_env_kwargs=config.extra_env_kwargs,
+                    extra_env_kwargs=extra_env_kwargs,
                     log_level="CRITICAL",  # disable console logging
                     log_file=str(log_file),
                     log_file_level=get_log_level(config.verbose),
