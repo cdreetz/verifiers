@@ -247,7 +247,7 @@ class ZMQEnvServer(EnvServer):
                 )
 
         except asyncio.CancelledError:
-            return
+            response = BaseResponse(success=False, error="Request was cancelled")
 
         except Exception as e:
             self.logger.error(
@@ -268,7 +268,24 @@ class ZMQEnvServer(EnvServer):
                 ),
             )
 
-        response_bytes = await asyncio.to_thread(serialize_response)
+        try:
+            response_bytes = await asyncio.to_thread(serialize_response)
+        except Exception as e:
+            self.logger.error(
+                f"Failed to serialize response for request {request_id}: {e}",
+                exc_info=True,
+            )
+            response_bytes = cast(
+                bytes,
+                msgpack.packb(
+                    BaseResponse(
+                        success=False,
+                        error=f"Response serialization failed: {repr(e)}",
+                    ).model_dump(mode="python", warnings=False),
+                    default=msgpack_encoder,
+                    use_bin_type=True,
+                ),
+            )
 
         # send response: [client_id, request_id, response]
         try:
