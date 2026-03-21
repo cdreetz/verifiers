@@ -5,12 +5,11 @@ import os
 import tarfile
 import tempfile
 from pathlib import Path
-from typing import Any, Callable, cast
-
-from verifiers.utils.path_utils import write_temp_file
+from typing import Any, Callable, Optional, cast
 
 import httpx
 import tenacity as tc
+from aiolimiter import AsyncLimiter
 from prime_sandboxes import (
     APIError,
     CommandTimeoutError,
@@ -24,6 +23,7 @@ from prime_sandboxes import (
 from prime_sandboxes.core import APIClient
 
 import verifiers as vf
+from verifiers.utils.path_utils import write_temp_file
 from verifiers.utils.threaded_sandbox_client import ThreadedAsyncSandboxClient
 
 # Enable httpx debug logging if HTTPX_LOG_LEVEL is set
@@ -98,6 +98,7 @@ class SandboxMixin:
     active_sandboxes: set[str]
     sandbox_client: ThreadedAsyncSandboxClient
     sandbox_wait_for_creation_max_attempts: int
+    sandbox_creation_rate_limiter: Optional[AsyncLimiter]
     with_retry: Callable
 
     def register_sandbox(self, sandbox_id: str) -> None:
@@ -115,10 +116,11 @@ class SandboxMixin:
         backoff_factor: float = 2.0,
         max_backoff_seconds: float = 30.0,
         jitter: float = 1e-3,
-        sandbox_client_max_workers: int = 10,
-        sandbox_client_max_connections: int = 100,
-        sandbox_client_max_keepalive_connections: int = 50,
+        sandbox_client_max_workers: int = 50,
+        sandbox_client_max_connections: int = 1000,
+        sandbox_client_max_keepalive_connections: int = 200,
         sandbox_wait_for_creation_max_attempts: int = 120,
+        sandbox_creations_per_minute: float | None = 128,
     ):
         """Initialize sandbox client and retry wrapper. Call from subclass __init__."""
         if not hasattr(self, "logger"):
@@ -126,6 +128,11 @@ class SandboxMixin:
         self.active_sandboxes = set()
         self.sandbox_wait_for_creation_max_attempts = (
             sandbox_wait_for_creation_max_attempts
+        )
+        self.sandbox_creation_rate_limiter = (
+            AsyncLimiter(max_rate=sandbox_creations_per_minute, time_period=60.0)
+            if sandbox_creations_per_minute is not None
+            else None
         )
         self.sandbox_client = ThreadedAsyncSandboxClient(
             max_workers=sandbox_client_max_workers,
@@ -150,11 +157,17 @@ class SandboxMixin:
     async def create_sandbox(self, state, request: CreateSandboxRequest) -> str:
         """Create sandbox with retry, tracking, wait_for_creation, and post-setup hook.
 
+        When a sandbox_creation_rate_limit is configured, this method
+        throttles to avoid overwhelming the sandbox API under burst load.
+
         Raises:
             SandboxCreationError: If sandbox creation fails after retries.
             SandboxNotReadyError: If sandbox fails to become ready.
             SandboxSetupError: If post_sandbox_setup hook fails.
         """
+        if self.sandbox_creation_rate_limiter is not None:
+            await self.sandbox_creation_rate_limiter.acquire()
+
         try:
             sandbox = await self.with_retry(self.sandbox_client.create)(request)
         except Exception as e:
@@ -274,7 +287,7 @@ class SandboxMixin:
             raise vf.SandboxError(
                 f"Sandbox {sandbox_id} OOM during upload to {remote_path}"
             ) from e
-        except SandboxTimeoutError as e:
+        except UploadTimeoutError as e:
             raise vf.SandboxError(
                 f"Sandbox {sandbox_id} timeout during upload to {remote_path}"
             ) from e
@@ -329,19 +342,21 @@ class SandboxMixin:
         Builds a tar.gz archive from ``file_map`` (relative path → UTF-8
         content), uploads it, and extracts into ``dest_dir``.
         """
-        buf = io.BytesIO()
-        with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-            for rel_path, content in file_map.items():
-                data = content.encode("utf-8")
-                info = tarfile.TarInfo(name=rel_path)
-                info.size = len(data)
-                tar.addfile(info, io.BytesIO(data))
-        bundle_bytes = buf.getvalue()
 
+        def build_tar() -> str:
+            buf = io.BytesIO()
+            with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+                for rel_path, content in file_map.items():
+                    data = content.encode("utf-8")
+                    info = tarfile.TarInfo(name=rel_path)
+                    info.size = len(data)
+                    tar.addfile(info, io.BytesIO(data))
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".tar.gz") as f:
+                f.write(buf.getvalue())
+                return f.name
+
+        tmp_path = await asyncio.to_thread(build_tar)
         archive_remote = f"{dest_dir}/_bundle.tar.gz"
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".tar.gz") as f:
-            f.write(bundle_bytes)
-            tmp_path = f.name
         try:
             await self.upload_file(sandbox_id, archive_remote, tmp_path)
         finally:

@@ -94,10 +94,11 @@ class CliAgentEnv(SandboxMixin, vf.MultiTurnEnv):
         backoff_factor: float = 2.0,
         max_backoff_seconds: float = 30.0,
         jitter: float = 1e-3,
-        sandbox_client_max_workers: int = 10,
-        sandbox_client_max_connections: int = 100,
-        sandbox_client_max_keepalive_connections: int = 50,
+        sandbox_client_max_workers: int = 50,
+        sandbox_client_max_connections: int = 1000,
+        sandbox_client_max_keepalive_connections: int = 200,
         sandbox_wait_for_creation_max_attempts: int = 120,
+        sandbox_creations_per_minute: float | None = 128,
         keep_sandbox_for_scoring: bool = False,
         **kwargs,
     ):
@@ -112,6 +113,7 @@ class CliAgentEnv(SandboxMixin, vf.MultiTurnEnv):
             sandbox_client_max_connections=sandbox_client_max_connections,
             sandbox_client_max_keepalive_connections=sandbox_client_max_keepalive_connections,
             sandbox_wait_for_creation_max_attempts=sandbox_wait_for_creation_max_attempts,
+            sandbox_creations_per_minute=sandbox_creations_per_minute,
         )
         self.keep_sandbox_for_scoring = keep_sandbox_for_scoring
         self.run_command = run_command
@@ -335,14 +337,15 @@ class CliAgentEnv(SandboxMixin, vf.MultiTurnEnv):
         """Normalize intercepted request tools for the provider-agnostic runtime.
 
         Assumes that agent requests arrive in OpenAI-tool format.
+        Avoids redundant Pydantic round-trips for already-validated Tool objects.
         """
         if not isinstance(intercept_tools, list):
             raise TypeError("Intercepted tools must be provided as a list.")
 
-        normalized_inputs: list[dict[str, Any]] = []
+        normalized: list[Tool] = []
         for raw_tool in intercept_tools:
             if isinstance(raw_tool, Tool):
-                normalized_inputs.append(raw_tool.model_dump(exclude_none=True))
+                normalized.append(raw_tool)
                 continue
             if not isinstance(raw_tool, dict):
                 raise TypeError(
@@ -359,28 +362,30 @@ class CliAgentEnv(SandboxMixin, vf.MultiTurnEnv):
                     raise TypeError(
                         "Intercepted function tool parameters must be a JSON object."
                     )
-                normalized_inputs.append(
-                    {
-                        "name": function_payload.get("name"),
-                        "description": function_payload.get("description", ""),
-                        "parameters": parameters,
-                        "strict": function_payload.get("strict"),
-                    }
+                normalized.append(
+                    Tool(
+                        name=function_payload.get("name", ""),
+                        description=function_payload.get("description", ""),
+                        parameters=parameters,
+                        strict=function_payload.get("strict"),
+                    )
                 )
                 continue
 
-            normalized_inputs.append(raw_tool_dict)
+            normalized.append(Tool.model_validate(raw_tool_dict))
 
-        return self._normalize_tool_defs(normalized_inputs)
+        return normalized
 
-    def normalize_intercepted_messages(self, intercepted_messages: object) -> Messages:
+    async def normalize_intercepted_messages(
+        self, intercepted_messages: object
+    ) -> Messages:
         """Hook to normalize messages received from the agent before model inference.
 
         Assumes that agent requests arrive in OpenAI-format.
         """
-        return normalize_messages(intercepted_messages)  # type: ignore
+        return await asyncio.to_thread(normalize_messages, intercepted_messages)  # type: ignore
 
-    def normalize_response(self, response: Response) -> Response:
+    async def normalize_response(self, response: Response) -> Response:
         """Hook to normalize the model response before it is stored in the trajectory.
 
         Override in subclasses to align the stored step format with the agent's
@@ -423,7 +428,7 @@ class CliAgentEnv(SandboxMixin, vf.MultiTurnEnv):
 
         state["current_request_id"] = request_id
         intercept = interception_server.intercepts[request_id]
-        return self.normalize_intercepted_messages(intercept["messages"])
+        return await self.normalize_intercepted_messages(intercept["messages"])
 
     async def get_model_response(
         self,
@@ -465,9 +470,29 @@ class CliAgentEnv(SandboxMixin, vf.MultiTurnEnv):
             model = state.get("model") or model
             intercept_tools = intercept.get("tools")
             if intercept_tools:
-                tool_defs = (
-                    self.normalize_intercepted_tools(intercept_tools) or tool_defs
-                )
+                # Cache normalized tools per rollout — agents typically send
+                # the same tool definitions on every request. Key on tool
+                # names so swapping tools with the same count invalidates
+                # the cache; normalize_intercepted_tools is idempotent so
+                # a false miss just re-normalizes.
+                def _tool_name(t: object) -> str:
+                    if isinstance(t, Tool):
+                        return t.name
+                    if isinstance(t, dict):
+                        td = cast(dict[str, Any], t)
+                        fn = td.get("function") or {}
+                        return fn.get("name", "")
+                    return ""
+
+                cache_key = tuple(sorted(_tool_name(t) for t in intercept_tools))
+                cached_key, cached_defs = state.get("_cached_tool_defs", (None, None))
+                if cached_key == cache_key and cached_defs is not None:
+                    tool_defs = cached_defs
+                else:
+                    tool_defs = (
+                        self.normalize_intercepted_tools(intercept_tools) or tool_defs
+                    )
+                    state["_cached_tool_defs"] = (cache_key, tool_defs)
 
         response: Response | None = None
         error: BaseException | None = None
@@ -511,7 +536,7 @@ class CliAgentEnv(SandboxMixin, vf.MultiTurnEnv):
         if len(state["trajectory"]) == 0:
             state["prompt"] = prompt_messages
         await super().add_model_response(
-            state, prompt_messages, self.normalize_response(response)
+            state, prompt_messages, await self.normalize_response(response)
         )
 
     @vf.teardown
