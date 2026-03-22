@@ -19,16 +19,14 @@ from openai.types.chat.chat_completion import Choice
 from openai.types.chat.chat_completion_message_tool_call import Function
 from prime_sandboxes import (
     AdvancedConfigs,
-    AsyncSandboxClient,
-    BackgroundJob,
-    BackgroundJobStatus,
     CreateSandboxRequest,
 )
 from prime_tunnel import Tunnel
 
 import verifiers as vf
-from verifiers.envs.experimental.resource_managers.sandbox_manager import ManagedSandbox, SandboxManager
+from verifiers.envs.experimental.resource_managers.sandbox_manager import BackgroundJob, ManagedSandbox, SandboxManager
 from verifiers.envs.experimental.resource_managers.base import ResourceState
+from verifiers.envs.experimental.resource_managers.retry import RetryConfig
 from verifiers.types import (
     ChatCompletionToolParam,
     Messages,
@@ -120,12 +118,15 @@ class NewCliAgentEnv(vf.MultiTurnEnv):
             labels=labels if labels else [],
         )
 
-        # Create the sandbox manager
+        # Create the sandbox manager with proper RetryConfig
+        retry_config = RetryConfig(
+            max_attempts=max_retries,
+            initial_delay=retry_delay,
+        )
         self.sandbox_manager = SandboxManager(
             default_request=self._default_request,
             timeout_per_command=300,  # Longer timeout for agent commands
-            max_retries=max_retries,
-            retry_delay=retry_delay,
+            retry_config=retry_config,
             enable_health_monitoring=enable_health_monitoring,
         )
 
@@ -220,13 +221,7 @@ class NewCliAgentEnv(vf.MultiTurnEnv):
         # Wait for sandbox to be ready
         await self.sandbox_manager.wait_for_ready(managed_sandbox.id)
 
-        # Create async client for operations that need it
-        sandbox_client = AsyncSandboxClient(
-            max_connections=100,
-            max_keepalive_connections=50,
-        )
-
-        await self.post_sandbox_setup(state, sandbox_client)
+        await self.post_sandbox_setup(state)
 
         request_id_queue: asyncio.Queue = asyncio.Queue()
         state["request_id_queue"] = request_id_queue
@@ -235,7 +230,7 @@ class NewCliAgentEnv(vf.MultiTurnEnv):
             "request_id_queue": request_id_queue,
         }
 
-        await self.start_agent(state, sandbox_client)
+        await self.start_agent(state)
 
         return state
 
@@ -255,19 +250,19 @@ class NewCliAgentEnv(vf.MultiTurnEnv):
             env_vars["OPENAI_MODEL"] = model
         return env_vars
 
-    async def post_sandbox_setup(
-        self, state: State, sandbox_client: AsyncSandboxClient
-    ) -> None:
-        """Hook for post-sandbox setup. Override to upload files, run commands, etc."""
+    async def post_sandbox_setup(self, state: State) -> None:
+        """Hook for post-sandbox setup. Override to upload files, run commands, etc.
+
+        Use self.sandbox_manager.execute_command() for commands (with retry and recording)
+        and self.sandbox_manager.client for other operations like upload_file.
+        """
         pass
 
-    async def start_agent(
-        self, state: State, sandbox_client: AsyncSandboxClient
-    ) -> None:
-        """Start the agent command using background job."""
+    async def start_agent(self, state: State) -> None:
+        """Start the agent command using background job via sandbox manager."""
         sandbox_id = state["sandbox_id"]
 
-        background_job: BackgroundJob = await sandbox_client.start_background_job(
+        background_job = await self.sandbox_manager.start_background_job(
             sandbox_id,
             self.run_command,
         )
@@ -275,13 +270,11 @@ class NewCliAgentEnv(vf.MultiTurnEnv):
         state["agent_start_time"] = time.time()
 
         state["completion_wait_task"] = asyncio.create_task(
-            self.wait_for_completion(state, sandbox_client)
+            self.wait_for_completion(state)
         )
 
-    async def wait_for_completion(
-        self, state: State, sandbox_client: AsyncSandboxClient
-    ) -> None:
-        """Poll for agent completion using background job API."""
+    async def wait_for_completion(self, state: State) -> None:
+        """Poll for agent completion using sandbox manager's background job API."""
         sandbox_id = state.get("sandbox_id")
         background_job: BackgroundJob | None = state.get("background_job")
 
@@ -308,20 +301,16 @@ class NewCliAgentEnv(vf.MultiTurnEnv):
     async def poll_job_completion(
         self, state: State, sandbox_id: str, background_job: BackgroundJob
     ) -> None:
-        """Poll until background job completes, capturing output."""
-        sandbox_client = AsyncSandboxClient(
-            max_connections=100,
-            max_keepalive_connections=50,
-        )
+        """Poll until background job completes via sandbox manager, capturing output."""
         while True:
-            status: BackgroundJobStatus = await sandbox_client.get_background_job(
+            background_job = await self.sandbox_manager.poll_background_job(
                 sandbox_id, background_job
             )
-            if status.completed:
-                state["agent_exit_code"] = status.exit_code
-                state["agent_stdout"] = status.stdout
-                state["agent_stderr"] = status.stderr
-                logger.debug(f"Agent completed with exit_code={status.exit_code}")
+            if background_job.completed:
+                state["agent_exit_code"] = background_job.exit_code
+                state["agent_stdout"] = background_job.stdout
+                state["agent_stderr"] = background_job.stderr
+                logger.debug(f"Agent completed with exit_code={background_job.exit_code}")
                 return
             await asyncio.sleep(1)
 
