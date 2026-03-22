@@ -219,20 +219,15 @@ class NewHarborEnv(NewCliAgentEnv):
                 sandbox_id, "bash test.sh", working_dir="/tests"
             )
 
-            reward_result = await self.sandbox_manager.execute_command(
+            reward_output = await self.sandbox_manager.execute_command(
                 sandbox_id,
                 "if [ -s /logs/verifier/reward.txt ]; then cat /logs/verifier/reward.txt; "
                 "elif [ -s /logs/verifier/reward.json ]; then cat /logs/verifier/reward.json; fi",
                 working_dir=None,
             )
-            stdout_val = getattr(reward_result, "stdout", "")
-            if stdout_val is None:
-                reward_val = ""
-            elif isinstance(stdout_val, str):
-                reward_val = stdout_val.strip()
-            else:
-                reward_val = str(stdout_val).strip()
-            if reward_val:
+            # execute_command returns a str directly (stdout content)
+            reward_val = reward_output.strip() if reward_output else ""
+            if reward_val and reward_val != "(no output)":
                 try:
                     value = float(reward_val)
                     logger.info(f"Reward from reward.txt: {value}")
