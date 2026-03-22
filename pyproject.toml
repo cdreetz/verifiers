@@ -28,14 +28,17 @@ classifiers = [
 ]
 
 dependencies = [
-    "datasets>=3.0.0",
+    "anthropic>=0.78.0",
+    "datasets>=3.0.0, <4.7.0",
     "jinja2>=3.1.6",
+    "numpy",
     "math-verify>=0.8.0",
     "mcp>=1.14.1",
     "nest-asyncio>=1.6.0", # for jupyter notebooks
     "openai>=1.108.1",
     "openai-agents>=0.0.7",
-    "prime-sandboxes>=0.2.9",
+    "prime-tunnel>=0.1.4",
+    "prime-sandboxes>=0.2.16",
     "pydantic>=2.11.9",
     "requests",
     "rich",
@@ -44,13 +47,17 @@ dependencies = [
     "tomli; python_version < '3.11'",
     "typing_extensions; python_version < '3.12'",
     "wget>=3.2",
+    "gepa",
+    "pyzmq>=27.1.0",
+    "msgpack>=1.1.2",
+    "aiolimiter>=1.2.1",
 ]
 
 [dependency-groups]
 dev = [
     "ruff",
     "pre-commit",
-    "ty>=0.0.1a29",
+    "ty>=0.0.1a29,<0.0.22",
     "pytest>=7.0.0",
     "pytest-asyncio>=0.21.0",
     "pytest-cov>=4.0.0",
@@ -59,6 +66,10 @@ dev = [
     "ipywidgets",
     "reasoning-gym",
     "textarena",
+    "openenv-core[core]==0.2.1",
+    "stagehand>=3.0.0",
+    "aiohttp>=3.9.0",
+    "python-dotenv>=1.0.0",
     "nltk",
 ]
 
@@ -69,6 +80,14 @@ rg = [
 ta = [
     "textarena",
     "nltk",
+]
+openenv = [
+    "openenv-core[core]==0.2.1",
+]
+browser = [
+    "stagehand>=3.0.0",
+    "aiohttp>=3.9.0",
+    "python-dotenv>=1.0.0",
 ]
 rl = [
     "torch>=2.8.0,<2.9.0",
@@ -83,6 +102,9 @@ rl = [
     "flash-attn>=2.8.3",
 ]
 
+[tool.uv]
+preview = true
+
 [tool.uv.extra-build-dependencies]
 flash-attn = [{ requirement = "torch", match-runtime = true }]
 
@@ -91,13 +113,15 @@ flash-attn = { FLASH_ATTENTION_SKIP_CUDA_BUILD = "TRUE" }
 
 [project.scripts]
 vf-eval = "verifiers.scripts.eval:main"
+vf-gepa = "verifiers.scripts.gepa:main"
 vf-init = "verifiers.scripts.init:main"
 vf-install = "verifiers.scripts.install:main"
 vf-setup = "verifiers.scripts.setup:main"
+vf-build = "verifiers.scripts.build:main"
 vf-rl = "verifiers.scripts.rl:main"
 vf-train = "verifiers.scripts.train:main"
 vf-tui = "verifiers.scripts.tui:main"
-vf-vllm = "verifiers.rl.inference.server:main"
+vf-vllm = "verifiers.scripts.vllm:main"
 prime-rl = "verifiers.scripts.prime_rl:main"
 
 # hatchling configuration
@@ -160,9 +184,12 @@ filterwarnings = [
 asyncio_mode = "auto"
 norecursedirs = [".git", ".tox", "dist", "build", "*.egg", "__pycache__"]
 
+[tool.ty.environment]
+python-version = "3.13"
+
 [tool.ty.rules]
-unresolved-import = "warn"
 unknown-argument = "warn"
+redundant-cast = "ignore"
 
 [tool.ty.src]
 exclude = ["environments"]

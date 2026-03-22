@@ -19,6 +19,7 @@ The `-s` flag prints sample outputs so you can see what's happening.
 ```bash
 prime eval tui
 ```
+The TUI opens a single run browser (`environment -> model -> run`). Press `Enter` on a run to open rollout details, `b` to go back, `tab` to cycle panes, `e` and `x` to expand or collapse history, `pageup` and `pagedown` to scroll history, and `c` for Copy Mode.
 
 **If using the Python API** (`env.generate()` / `env.evaluate()`):
 
@@ -101,13 +102,6 @@ def relative_reward(completions: list, answers: list, **kwargs) -> list[float]:
 ```
 
 ## Training
-
-### What's the difference between `prime-rl` and `vf-rl`?
-
-- **prime-rl**: Production-ready, multi-node, MoE support, advanced features. Use for serious training.
-- **vf-rl**: Minimal (~1000 LOC), single-node, hackable. Use for small-scale testing or as a starting point for your own training loop.
-
-Both use the same core algorithm (async CISPO).
 
 ### How do I use a local vLLM server?
 

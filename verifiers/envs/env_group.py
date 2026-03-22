@@ -1,14 +1,20 @@
-import time
-from typing import TYPE_CHECKING, AsyncContextManager, Mapping, final
+from __future__ import annotations
 
-from datasets import Dataset, concatenate_datasets
-from openai import AsyncOpenAI
+import time
+from typing import TYPE_CHECKING, Mapping, final
 
 import verifiers as vf
-from verifiers.types import RolloutInput, SamplingArgs
+from verifiers.clients import Client
+from verifiers.types import (
+    ClientConfig,
+    Messages,
+    RolloutInput,
+    SamplingArgs,
+)
+from verifiers.workers.client.env_client import EnvClient
 
 if TYPE_CHECKING:
-    pass
+    from datasets import Dataset
 
 
 class EnvGroupRubric(vf.Rubric):
@@ -37,7 +43,6 @@ class EnvGroupRubric(vf.Rubric):
     async def score_rollout(
         self,
         state: vf.State,
-        score_sem: AsyncContextManager,
     ) -> None:
         """
         Evaluate all reward functions in-place for a single rollout.
@@ -56,7 +61,7 @@ class EnvGroupRubric(vf.Rubric):
             state["metrics"] = metrics
             return
 
-        await env.rubric.score_rollout(state, score_sem=score_sem)
+        await env.rubric.score_rollout(state)
         env_reward = state.get("reward", 0.0)
         env_metrics = state.get("metrics", {}).copy() if state.get("metrics") else {}
 
@@ -71,7 +76,6 @@ class EnvGroupRubric(vf.Rubric):
     async def score_group(
         self,
         states: list[vf.State],
-        score_sem: AsyncContextManager,
     ) -> None:
         """
         Score a group of rollouts, routing to appropriate environment rubrics based on task.
@@ -94,7 +98,7 @@ class EnvGroupRubric(vf.Rubric):
             return
 
         # Score all states using the environment's rubric
-        await env.rubric.score_group(states, score_sem=score_sem)
+        await env.rubric.score_group(states)
 
         # Initialize metrics dict with all reward function names
         aggregated_metrics: dict[str, list[float]] = {
@@ -142,6 +146,8 @@ class EnvGroup(vf.Environment):
                       If not provided, uses "env_0", "env_1", etc.
             **kwargs: Additional arguments passed to parent Environment
         """
+        from datasets import concatenate_datasets
+
         if not envs:
             raise ValueError("EnvGroup requires at least one environment")
 
@@ -170,16 +176,16 @@ class EnvGroup(vf.Environment):
         for env, name in zip(self.envs, self.env_names):
             add_task = make_add_task_fn(name)
 
-            # Access dataset directly to avoid get_dataset() raising when None
-            env_dataset = env.dataset
+            # Build dataset if using DatasetBuilder, returns None if not available
+            env_dataset = env.build_dataset()
             if env_dataset is not None:
                 # override task column to use env_name for routing
                 if "task" in env_dataset.column_names:
                     env_dataset = env_dataset.remove_columns(["task"])
                 env_dataset = env_dataset.map(add_task, **map_kwargs)
                 datasets.append(env_dataset)
-            # Access eval_dataset directly to avoid get_eval_dataset() raising when None
-            env_eval_dataset = env.eval_dataset
+            # Build eval_dataset if using DatasetBuilder, returns None if not available
+            env_eval_dataset = env.build_eval_dataset()
             if env_eval_dataset is not None:
                 # override task column to use env_name for routing
                 if "task" in env_eval_dataset.column_names:
@@ -191,14 +197,14 @@ class EnvGroup(vf.Environment):
         # wrap rubrics in EnvGroupRubric
         rubric = EnvGroupRubric(self.env_map)
 
-        # don't set oai_tools at the group level since different sub-environments
+        # don't set tool_defs at the group level since different sub-environments
         # may have different tools. Instead, set them per-task in rollout().
         # initialize parent Environment
         super().__init__(
             dataset=dataset,
             eval_dataset=eval_dataset,
             rubric=rubric,
-            oai_tools=None,
+            tool_defs=None,
             map_kwargs=map_kwargs,
             **kwargs,
         )
@@ -210,7 +216,7 @@ class EnvGroup(vf.Environment):
         self,
         dataset: Dataset,
         system_prompt: str | None = None,
-        few_shot: vf.ChatMessages | None = None,
+        few_shot: Messages | None = None,
         question_key: str = "question",
         answer_key: str = "answer",
         map_kwargs: dict = {},
@@ -263,10 +269,50 @@ class EnvGroup(vf.Environment):
         return dataset
 
     @final
+    async def run_rollout(  # type: ignore[override]
+        self,
+        input: RolloutInput,
+        client: Client | ClientConfig,
+        model: str,
+        sampling_args: SamplingArgs,
+        max_retries: int = 0,
+        state_columns: list[str] | None = None,
+        env_client: EnvClient | None = None,
+    ) -> vf.RolloutOutput:
+        env = self.get_env_for_task(input["task"])
+        env_client = env_client or env.env_client or self.env_client
+        return await env.run_rollout(
+            input, client, model, sampling_args, max_retries, state_columns, env_client
+        )
+
+    @final
+    async def run_group(  # type: ignore[override]
+        self,
+        group_inputs: list[RolloutInput],
+        client: Client | ClientConfig,
+        model: str,
+        sampling_args: SamplingArgs,
+        max_retries: int = 0,
+        state_columns: list[str] | None = None,
+        env_client: EnvClient | None = None,
+    ) -> list[vf.RolloutOutput]:
+        env = self.get_env_for_task(group_inputs[0]["task"])
+        env_client = env_client or env.env_client or self.env_client
+        return await env.run_group(
+            group_inputs,
+            client,
+            model,
+            sampling_args,
+            max_retries,
+            state_columns,
+            env_client,
+        )
+
+    @final
     async def rollout(
         self,
         input: RolloutInput,
-        client: AsyncOpenAI,
+        client: Client,
         model: str,
         sampling_args: SamplingArgs | None = None,
     ) -> vf.State:
@@ -281,12 +327,6 @@ class EnvGroup(vf.Environment):
         self.max_seq_len = max_seq_len
         for env in self.envs:
             env.set_max_seq_len(max_seq_len)
-
-    def set_interleaved_rollouts(self, interleaved_rollouts: bool) -> None:
-        """Set the interleaved_rollouts flag for this environment group and all sub-environments."""
-        self.interleaved_rollouts = interleaved_rollouts
-        for env in self.envs:
-            env.set_interleaved_rollouts(interleaved_rollouts)
 
     def set_score_rollouts(self, score_rollouts: bool) -> None:
         """Set the score_rollouts flag for this environment group and all sub-environments."""

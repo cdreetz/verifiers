@@ -7,6 +7,7 @@ This guide walks through building environments in Verifiers, from simple single-
 - [Datasets](#datasets)
   - [Building the Prompt](#building-the-prompt)
   - [Evaluation Datasets](#evaluation-datasets)
+  - [Lazy Loading with DatasetBuilder](#lazy-loading-with-datasetbuilder)
 - [Rubrics](#rubrics)
   - [Reward Functions](#reward-functions)
   - [Multiple Reward Functions](#multiple-reward-functions)
@@ -30,6 +31,9 @@ This guide walks through building environments in Verifiers, from simple single-
   - [Managing Dependencies](#managing-dependencies)
   - [Installation](#installation)
 - [Environment Groups](#environment-groups)
+- [Performance](#performance)
+  - [Avoiding Sync Operations](#avoiding-sync-operations)
+  - [Executor Autoscaling](#executor-autoscaling)
 - [Integrations and Experimental Environments](#integrations-and-experimental-environments)
 
 ## Your First Environment
@@ -129,6 +133,37 @@ return vf.SingleTurnEnv(
 ```
 
 When running `prime eval run`, the evaluation dataset is used by default. If no `eval_dataset` is provided, evaluation falls back to the training dataset.
+
+### Lazy Loading with DatasetBuilder
+
+For large datasets or when running multiple environment replicas, you can defer dataset loading using a `DatasetBuilder`—a callable that returns a `Dataset` when invoked:
+
+```python
+def get_dataset_builder(split: str = "train", seed: int = 42) -> vf.DatasetBuilder:
+    """Returns a builder that lazily loads the dataset."""
+    def build() -> Dataset:
+        ds = load_dataset("my-dataset", split=split)
+        ds = ds.shuffle(seed=seed)
+        return ds
+    return build
+
+def load_environment():
+    dataset_builder = get_dataset_builder(split="train")
+    eval_builder = get_dataset_builder(split="test")
+    
+    return vf.SingleTurnEnv(
+        dataset=dataset_builder,      # built on first access
+        eval_dataset=eval_builder,    # built on first access
+        rubric=rubric,
+    )
+```
+
+The builder pattern is useful when:
+- Dataset loading is expensive (e.g., downloading from Hugging Face)
+- Multiple environment replicas don't all need to own the dataset
+- You want to parameterize dataset creation without loading it immediately
+
+When a raw `Dataset` is passed directly (the default pattern), it is loaded eagerly during environment initialization for backwards compatibility.
 
 ## Rubrics
 
@@ -458,6 +493,18 @@ The model sees `run_code(code: str)` in its tool schema, but the environment inj
 
 Verifiers includes several built-in stateful environment classes: `SandboxEnv` provides a containerized bash shell, and `PythonEnv` extends it with a persistent Python REPL (both of which are configured for use with Prime Intellect's [Sandboxes](https://docs.primeintellect.ai/sandboxes/overview)). These handle sandbox lifecycle management automatically.
 
+Both `SandboxEnv` and `CliAgentEnv` accept a `labels` parameter for tagging sandboxes:
+
+```python
+env = vf.SandboxEnv(
+    dataset=dataset,
+    rubric=rubric,
+    labels=["experiment-1", "math-tasks"],  # optional labels for sandbox categorization
+)
+```
+
+Labels are passed to the Prime Sandboxes API and can be used for organizing, filtering, and managing sandboxes across experiments or training runs.
+
 Stateful environments often define methods decorated with `@vf.cleanup` (called after each rollout) or `@vf.teardown` (called once at environment shutdown) for resource management. These decorators, along with `@vf.stop` for custom stop conditions (boolean functions checked after each turn), are powerful tools for rollout lifecycle control in custom `MultiTurnEnv` subclasses.
 
 ## Custom Multi-Turn Environments
@@ -548,7 +595,7 @@ Verifiers defines a hierarchy of error types under `vf.Error`:
 - `vf.ModelError` — errors from model interactions (e.g., `vf.EmptyModelResponseError`)
 - `vf.OverlongPromptError` — prompt exceeds model context length
 - `vf.ToolError` — tool-related errors (`vf.ToolParseError`, `vf.ToolCallError`)
-- `vf.InfraError` — infrastructure errors (e.g., `vf.SandboxError`)
+- `vf.InfraError` — infrastructure errors (e.g., `vf.SandboxError`, `vf.TunnelError`)
 
 When a `vf.Error` is raised during a rollout, it is automatically caught and stored in `state["error"]`, triggering the built-in `has_error` stop condition at the next check. This allows rollouts to terminate gracefully rather than crashing.
 
@@ -585,11 +632,13 @@ class MyGameEnv(vf.MultiTurnEnv):
     @vf.cleanup
     async def save_game_log(self, state: vf.State):
         await log_game_result(state["game_id"], state["score"])
-    
+
     @vf.teardown
     async def close_connections(self):
         await self.db_connection.close()
 ```
+
+> **Important:** Cleanup methods should be **idempotent**—safe to call multiple times—and handle errors gracefully. This ensures correct behavior when rollouts are cancelled or interrupted, and that cleanup completes even when resources are in unexpected states.
 
 ### Signaling Early Termination
 
@@ -607,16 +656,16 @@ This bypasses the normal model response loop and immediately terminates the roll
 
 ## Developing Environments
 
-Environments are packaged as installable Python projects. We recommend developing environments in a workspace with `environments/` and `configs/` folders. The `vf-setup` command initializes this structure:
+Environments are packaged as installable Python projects. We recommend developing environments in a workspace with `environments/` and `configs/` folders. The `prime lab setup` command initializes this structure:
 
 ```bash
-vf-setup
+prime lab setup
 ```
 
-The `vf-init` command initializes a new environment project:
+The `prime env init` command initializes a new environment project:
 
 ```bash
-vf-init my-env
+prime env init my-env
 ```
 
 This creates the following structure:
@@ -684,6 +733,27 @@ dependencies = [
 ]
 ```
 
+### Required API Keys
+
+Environments that require external API keys (e.g., for judge models or external services) should validate them early in `load_environment()` using `vf.ensure_keys()`:
+
+```python
+import verifiers as vf
+
+def load_environment(api_key_var: str = "OPENAI_API_KEY") -> vf.Environment:
+    vf.ensure_keys([api_key_var])
+    # now safe to use os.environ[api_key_var]
+    ...
+```
+
+This raises `MissingKeyError` with a clear message listing all missing keys and instructions for setting them:
+
+- **Environments Hub CI**: Add secrets on the environment's Settings page
+- **Hosted Training**: Set `env_file` in your config (e.g., `env_file = ["secrets.env"]`)
+- **Local**: Export in your shell (e.g., `export OPENAI_API_KEY=...`)
+
+Document required variables in your README under a "Required Environment Variables" section.
+
 ### Installation
 
 Install a local environment with `prime env install`:
@@ -712,6 +782,93 @@ combined = vf.EnvGroup(
 
 The group concatenates all sub-environment datasets, tagging each row with a `task` column that routes rollouts to the appropriate environment for generation and scoring. Metrics from all environments are tracked together. 
 
+## Performance
+
+Verifiers runs rollouts concurrently on a single `asyncio` event loop. Any synchronous operation in environment code blocks **all** concurrent rollouts for its duration. At scale this adds up quickly — a 10ms sync call in at 2,000 concurrent rollouts serializes into 20 seconds of wall-clock blocking where no other rollout can make progress. The most impactful optimization is eliminating sync operations on the hot path rollout execution code, i.e. any method that runs *for each rollout* (e.g. `setup_state`, `env_response`, or reward functions).
+
+### Avoiding Sync Operations
+
+Common offenders include `time.sleep`, sync HTTP/LLM clients (`httpx.Client`, `OpenAI`), `deepcopy`, serialization, and file I/O. These should be **avoided at all costs**. Instead, use an async-native alternatives (e.g. `asyncio.sleep`, `httpx.AsyncClient`, `AsyncOpenAI`, `aiofiles`) or offload to the default thread pool with `asyncio.to_thread()`:
+
+```python
+# ❌ time.sleep blocks the event loop
+time.sleep(1)
+# ✅ asyncio.sleep yields control
+await asyncio.sleep(1)
+
+# ❌ sync HTTP clients
+requests.get(url)
+# ✅ async HTTP clients
+async with httpx.AsyncClient() as client:
+    await client.get(url)
+
+# ❌ sync LLM clients
+sync_client = OpenAI()
+sync_client.chat.completions.create(...)
+# ✅ use built-in async LLM calls
+async_client = AsyncOpenAI()
+await async_client.chat.completions.create(...)
+
+# ❌ deepcopy blocks for large objects
+copy.deepcopy(large_obj)
+# ✅ offload to thread pool
+await asyncio.to_thread(copy.deepcopy, large_obj)
+
+# ❌ serialization blocks for large payloads
+data_str = json.dumps(data)
+# ✅ offload to thread pool (+use faster lib)
+await asyncio.to_thread(orjson.dumps, data)
+
+# ❌ sync file I/O
+with open(file, "w") as f:
+    f.write(data)
+# ✅ use the built-in helper
+from verifiers.utils.path_utils import write_temp_file
+tmp_path = await asyncio.to_thread(write_temp_file, data, ".txt")
+```
+
+Note that `asyncio.to_thread()` releases the event loop but still holds the GIL. For truly CPU-bound operations (heavy computation, compilation, large data transforms >50ms), use a process pool instead:
+
+```python
+from concurrent.futures import ProcessPoolExecutor
+
+executor = ProcessPoolExecutor(max_workers=4)
+
+async def heavy_reward(data):
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(executor, cpu_bound_fn, data)
+```
+
+### Executor Autoscaling
+
+`asyncio.to_thread()` dispatches work to a thread pool executor. By default Python's executor is small, but environments can scale it via `set_concurrency()`:
+
+```python
+env.set_concurrency(256)
+```
+
+This resizes both the default event-loop executor (used by `asyncio.to_thread()`) and all registered executors in one call. If your environment creates its own `ThreadPoolExecutor` or `ProcessPoolExecutor` (e.g. for a custom client), register it so it scales automatically:
+
+```python
+from concurrent.futures import ThreadPoolExecutor  # or ProcessPoolExecutor
+from verifiers.utils.thread_utils import register_executor, unregister_executor
+
+# register during init — if set_concurrency() was already called,
+# the executor is immediately resized to match
+self.my_executor = ThreadPoolExecutor(max_workers=4)
+register_executor("my-env-client", self.my_executor)
+
+# unregister during teardown (does not shut down the executor)
+unregister_executor("my-env-client")
+self.my_executor.shutdown()
+```
+
+In practice, you rarely need to call `set_concurrency()` yourself. Both `prime eval run` and `prime-rl` automatically compute the right worker count from the concurrency level. If you wish to override the automatic value during evaluation, you can do so with the `--extra-env-kwargs` flag:
+
+```bash
+prime eval run my-env -x '{"concurrency": 256}'
+```
+
 ## Integrations and Experimental Environments
 
 Beyond the core environment types, Verifiers includes integrations with several third-party environment libraries, as well as a few newer and more experimental environment classes (which are less stable and more subject to frequent changes).
@@ -720,12 +877,16 @@ Supported third-party environment integrations include:
 
 - **`TextArenaEnv`** — wraps [TextArena](https://github.com/LeonGuertler/TextArena) text-based game environments
 - **`ReasoningGymEnv`** — wraps [reasoning-gym](https://github.com/open-thought/reasoning-gym) procedural datasets
+- **`BrowserEnv`** — unified browser automation via [Browserbase](https://browserbase.com) with DOM and CUA modes
+- **`OpenEnvEnv`** — wraps OpenEnv gym and MCP contracts using Prime Sandboxes with prebuilt images referenced from `.build.json`
 
-These require additional dependencies installed via extras (e.g., `uv add 'verifiers[ta]'` for TextArena).
+These require additional dependencies installed via extras (e.g., `uv add 'verifiers[ta]'` for TextArena, `uv add 'verifiers[browser]'` for BrowserEnv, `uv add 'verifiers[openenv]'` for OpenEnvEnv). For OpenEnv environments, build the bundled project image with `prime env build <env-id>` before evaluation or training.
 
 Newer and more experimental environment classes include:
 
 - **`GymEnv`** — universal runner for Gym-compatible environments (OpenAI Gym / Gymnasium API)
-- **`CliAgentEnv`** — runs custom agent code inside sandboxes, intercepting API requests
+- **`CliAgentEnv`** — runs custom agent code inside sandboxes, intercepting API requests. Accepts sandbox configuration parameters including `docker_image`, `cpu_cores`, `memory_gb`, `disk_size_gb`, `gpu_count`, `timeout_minutes`, `environment_vars`, and `labels` for sandbox categorization. Also accepts retry tuning (like `max_retries`) and connection pooling ( like `sandbox_client_max_workers`) parameters via `SandboxMixin`
 - **`HarborEnv`** — loads Harbor-format agent benchmark tasks
-- **`RLMEnv`** — implements Recursive Language Models for unbounded context processing. Supports `execution_backend="sandbox"` (default) or `"local"` for host execution. User code runs in a Python REPL with a best-effort guardrail that blocks common filesystem modules and `open` by default; customize via `disallowed_modules`/`disallowed_builtins`.
+- **`RLMEnv`** — implements [Recursive Language Models](https://alexzhang13.github.io/blog/2025/rlm/) for unbounded context processing via REPL-based decomposition and recursive sub-LLM calls
+- **`OpenCodeEnv`** — runs [OpenCode](https://opencode.ai) CLI agents inside sandboxes with API call interception
+- **`OpenCodeRLMEnv`** — extends `OpenCodeEnv` with concurrent sub-LLM handling via the [OC plugin](https://github.com/snimu/oc), routing `subagent`/`llm-subcall` requests through the interception proxy

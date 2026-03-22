@@ -1,88 +1,145 @@
 import asyncio
 import logging
-from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Callable
+import os
+import time
+from concurrent.futures import ProcessPoolExecutor
+from typing import cast
 
-from math_verify import parse, verify  # type: ignore[unresolved-import]
+from math_verify import parse, verify
 
 from verifiers.parsers.maybe_think_parser import MaybeThinkParser
 from verifiers.parsers.parser import Parser
 from verifiers.rubrics.rubric import Rubric
 from verifiers.types import Messages, RewardFunc
 from verifiers.utils.data_utils import extract_boxed_answer
+from verifiers.utils.thread_utils import register_executor, unregister_executor
+
+
+def verify_response(
+    response: str,
+    answer: str,
+    max_verify_chars: int,
+) -> tuple[float, float]:
+    """
+    Verify a response against an answer using math_verify.
+
+    Top-level function so it can be pickled for ProcessPoolExecutor.
+    Times itself internally so event loop lag doesn't affect scoring.
+    """
+    start = time.perf_counter()
+    if response == "":
+        elapsed = time.perf_counter() - start
+        return 0.0, elapsed
+
+    if len(response) > max_verify_chars:
+        elapsed = time.perf_counter() - start
+        return 0.0, elapsed
+
+    try:
+        parsed_answer = parse(f"\\boxed{{{answer}}}", parsing_timeout=cast(int, None))
+        parsed_response = parse(
+            f"\\boxed{{{response}}}", parsing_timeout=cast(int, None)
+        )
+        is_correct = verify(parsed_answer, parsed_response, timeout_seconds=None)
+        elapsed = time.perf_counter() - start
+        return float(is_correct), elapsed
+    except BaseException:
+        elapsed = time.perf_counter() - start
+        return 0.0, elapsed
 
 
 class MathRubric(Rubric):
+    HARD_TIMEOUT_SECONDS: float = 120.0
+    MAX_VERIFY_CHARS: int = 50_000
+
     def __init__(
         self,
         funcs: list[RewardFunc] | None = None,
         weights: list[float] | None = None,
         parser: Parser | None = None,
-        max_workers: int = 10,
+        max_workers: int = 8,
         timeout_seconds: float = 5,
+        max_verify_chars: int = MAX_VERIFY_CHARS,
     ):
-        parser = parser or MaybeThinkParser(extract_fn=extract_boxed_answer)
+        from functools import partial
+
+        parser = parser or MaybeThinkParser(
+            extract_fn=partial(extract_boxed_answer, strict=True)
+        )
+        self.max_verify_chars = max_verify_chars
         super().__init__(funcs=funcs, weights=weights, parser=parser)
         self.add_reward_func(self.correct_answer)
         self.timeout_seconds = timeout_seconds
-        self.executor = ThreadPoolExecutor(
-            max_workers=max_workers,
-            thread_name_prefix="math-rubric",
+
+        self.executor = ProcessPoolExecutor(max_workers=1)
+        self.executor_name = f"math-verify-{id(self)}"
+        register_executor(
+            self.executor_name,
+            self.executor,
+            scaling_fn=lambda c: min(
+                max(1, c // 128), min(max_workers, os.cpu_count() or 1)
+            ),
         )
 
-        # suppress math_verify timeout warnings (we handle timeouts ourselves via asyncio.wait_for)
+        # suppress math_verify timeout warnings (we handle timeouts ourselves)
         logging.getLogger("math_verify.parser").setLevel(logging.ERROR)
         logging.getLogger("math_verify.grader").setLevel(logging.ERROR)
-
-    async def run_in_executor(self, func: Callable, *args) -> Any:
-        """Run a sync function in the thread pool."""
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(self.executor, func, *args)
 
     async def correct_answer(
         self, parser: Parser, completion: Messages, answer: str, **kwargs
     ) -> float:
         """Reward function that checks if the final answer matches the expected answer."""
+        response = parser.parse_answer(completion) or ""
 
-        async def _correct_answer() -> float:
-            try:
-                response = (
-                    await self.run_in_executor(lambda: parser.parse_answer(completion))
-                    or ""
-                )
-                if response == "":
-                    self.logger.warning("Parsed response is empty")
-                    return 0.0
-
-                parsed_answer = await self.run_in_executor(
-                    lambda: parse(f"\\boxed{{{answer}}}", parsing_timeout=None)  # type: ignore
-                )
-                parsed_response = await self.run_in_executor(
-                    lambda: parse(f"\\boxed{{{response}}}", parsing_timeout=None)  # type: ignore
-                )
-                result = await self.run_in_executor(
-                    lambda: verify(parsed_answer, parsed_response, timeout_seconds=None)
-                )
-                return 1.0 if result else 0.0
-            except asyncio.CancelledError:
-                raise
-            except BaseException as e:
-                self.logger.warning(
-                    f"Math verification failed with {type(e).__name__}: {e!r}"
-                )
-                return 0.0
-
-        try:
-            return await asyncio.wait_for(
-                _correct_answer(), timeout=self.timeout_seconds
-            )
-        except asyncio.TimeoutError:
+        if len(response) > self.max_verify_chars:
             self.logger.warning(
-                f"Math verification timed out after {self.timeout_seconds:.1f}s"
+                f"Skipping math verification: parsed response too long "
+                f"({len(response)} chars > {self.max_verify_chars} limit)"
             )
             return 0.0
 
+        self.logger.debug(
+            f"Math verify input: response={response[:200]!r}, answer={answer[:200]!r}"
+        )
+
+        loop = asyncio.get_running_loop()
+
+        try:
+            reward, elapsed = await asyncio.wait_for(
+                loop.run_in_executor(
+                    self.executor,
+                    verify_response,
+                    response,
+                    answer,
+                    self.max_verify_chars,
+                ),
+                timeout=self.HARD_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            self.logger.warning(
+                f"Math verification hit hard timeout after {self.HARD_TIMEOUT_SECONDS:.0f}s. "
+                f"response={response[:200]!r}, answer={answer[:200]!r}"
+            )
+            return 0.0
+        except Exception as e:
+            self.logger.warning(
+                f"Math verification failed: {e}. "
+                f"response={response[:200]!r}, answer={answer[:200]!r}"
+            )
+            return 0.0
+
+        if elapsed > self.timeout_seconds:
+            self.logger.debug(
+                f"Math verification exceeded time limit after {elapsed:.2f}s (>{self.timeout_seconds:.1f}s). "
+                f"response={response[:200]!r}, answer={answer[:200]!r}"
+            )
+            return 0.0
+
+        return reward
+
     def __del__(self):
-        """Shutdown the thread pool executor when the object is garbage collected."""
+        """Shutdown the process pool executor when the object is garbage collected."""
+        if hasattr(self, "executor_name"):
+            unregister_executor(self.executor_name)
         if hasattr(self, "executor"):
             self.executor.shutdown(wait=False)

@@ -31,8 +31,12 @@ prime lab setup
 This sets up a Python project if needed (with `uv init`), installs `verifiers` (with `uv add verifiers`), creates the recommended workspace structure, and downloads useful starter files:
 ```
 configs/
-├── endpoints.py        # OpenAI-compatible API endpoint configuration
-└── lab/                # Example configs for Hosted Training
+├── endpoints.toml      # OpenAI-compatible API endpoint configuration
+├── rl/                 # Example configs for Hosted Training
+├── eval/               # Example multi-environment eval configs
+└── gepa/               # Example configs for prompt optimization
+.prime/
+└── skills/             # Bundled workflow skills for create/browse/review/eval/GEPA/train/brainstorm
 environments/
 └── AGENTS.md           # Documentation for AI coding agents
 AGENTS.md               # Top-level documentation for AI coding agents
@@ -86,16 +90,17 @@ To run a local evaluation with any OpenAI-compatible model, do:
 ```bash
 prime eval run my-env -m gpt-5-nano # run and save eval results locally
 ```
-Evaluations use [Prime Inference](https://docs.primeintellect.ai/inference/overview) by default; configure your own API endpoints in `./configs/endpoints.py`.
+Evaluations use [Prime Inference](https://docs.primeintellect.ai/inference/overview) by default; configure your own API endpoints in `./configs/endpoints.toml`.
 
 View local evaluation results in the terminal UI:
 ```bash
 prime eval tui
 ```
+The TUI opens a single run browser (`environment -> model -> run`). Press `Enter` on a run to open rollout details, `b` to go back, `tab` to cycle panes, `e` and `x` to expand or collapse history, `pageup` and `pagedown` to scroll history, and `c` for Copy Mode.
 
 To publish the environment to the [Environments Hub](https://app.primeintellect.ai/dashboard/environments?ex_sort=most_stars), do:
 ```bash
-prime env push --path ./environments/my_env
+prime env push my-env # equivalent to --path ./environments/my_env
 ```
 
 To run an evaluation directly from the Environments Hub, do:

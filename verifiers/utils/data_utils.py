@@ -1,11 +1,14 @@
 # NOTE: Helper functions for example datasets. Not intended for core functionality.
 
+from __future__ import annotations
+
 import random
-from typing import Any, Callable, cast
+from typing import TYPE_CHECKING, Any, Callable, cast
 
-from datasets import Dataset, concatenate_datasets, load_dataset
+from verifiers.types import Messages
 
-from verifiers.types import ChatMessage
+if TYPE_CHECKING:
+    from datasets import Dataset
 
 ### PROMPTS ###
 
@@ -22,7 +25,7 @@ BOXED_SYSTEM_PROMPT = (
 def format_dataset(
     dataset: Dataset,
     system_prompt: str | None = None,
-    few_shot: list[ChatMessage] | None = None,
+    few_shot: Messages | None = None,
     question_key: str = "question",
     answer_key: str = "answer",
     map_kwargs: dict = {},
@@ -36,10 +39,10 @@ def format_dataset(
     ):
         dataset = dataset.rename_column("example_id", "src_id")
     if "example_id" not in dataset.column_names:
-        dataset = dataset.add_column("example_id", range(len(dataset)))  # type: ignore
+        dataset = dataset.add_column("example_id", range(len(dataset)))
 
     # extract format_prompt as a standalone function to avoid capturing self
-    def format_prompt_fn(prompt_str: str) -> list[ChatMessage]:
+    def format_prompt_fn(prompt_str: str) -> Messages:
         messages = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
@@ -69,7 +72,17 @@ def format_dataset(
     return dataset
 
 
-def extract_boxed_answer(text: str) -> str:
+def extract_boxed_answer(text: str, strict: bool = False) -> str:
+    """Extract the last \\boxed{...} answer from text.
+
+    Args:
+        text: The text to extract from.
+        strict: If True, return "" when no \\boxed{} is found (for reward
+            scoring where format compliance matters). If False, return the
+            original text as a passthrough (for environments that use this
+            as a general text extractor).
+    """
+
     def find_matching_brace(s: str, start: int) -> int:
         count = 1
         i = start
@@ -84,13 +97,13 @@ def extract_boxed_answer(text: str) -> str:
     # Find last \boxed{
     boxed_start = text.rfind("\\boxed{")
     if boxed_start == -1:
-        return text
+        return "" if strict else text
     # Find the content between the braces
     content_start = boxed_start + 7  # len('\\boxed{')
     closing_brace = find_matching_brace(text, content_start)
 
     if closing_brace == -1:
-        return text
+        return "" if strict else text
 
     return text[content_start:closing_brace]
 
@@ -259,6 +272,8 @@ def get_preprocess_fn(name: str) -> Callable[[dict], dict]:
 def load_example_dataset(
     name: str = "gsm8k", split: str | None = None, n: int | None = None, seed: int = 0
 ) -> Dataset:
+    from datasets import Dataset, concatenate_datasets, load_dataset
+
     if name == "aime2024":
         if split is None:
             split = "train"
@@ -268,10 +283,10 @@ def load_example_dataset(
             split = "test"
         aime_i = cast(
             Dataset, load_dataset("opencompass/AIME2025", "AIME2025-I")[split]
-        )  # type: ignore[redundant-cast]
+        )
         aime_ii = cast(
             Dataset, load_dataset("opencompass/AIME2025", "AIME2025-II")[split]
-        )  # type: ignore[redundant-cast]
+        )
         dataset = concatenate_datasets([aime_i, aime_ii])
     elif name == "amc2023":
         if split is None:
@@ -316,17 +331,19 @@ def load_example_dataset(
     elif name == "openrs_easy":
         if split is None:
             split = "train"
-        dataset = load_dataset("knoveleng/open-rs")[split]
+        dataset = cast(Dataset, load_dataset("knoveleng/open-rs")[split])
         dataset = dataset.filter(lambda x: x["level"] == "Easy")
     elif name == "openrs_hard":
         if split is None:
             split = "train"
-        dataset = load_dataset("knoveleng/open-rs")[split]
+        dataset = cast(Dataset, load_dataset("knoveleng/open-rs")[split])
         dataset = dataset.filter(lambda x: x["level"] == "Hard")
     elif name == "prime_code":
         if split is None:
             split = "train"
-        dataset = load_dataset("PrimeIntellect/verifiable-coding-problems")[split]
+        dataset = cast(
+            Dataset, load_dataset("PrimeIntellect/verifiable-coding-problems")[split]
+        )
         dataset = dataset.filter(
             lambda x: x["prompt"].startswith(
                 "Solve the following coding problem using the programming language python:"

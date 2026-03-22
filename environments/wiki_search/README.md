@@ -44,9 +44,13 @@ prime eval run wiki-search \
 ```
 
 Notes:
-- Set `OPENAI_API_KEY` in your environment for both judge and embedding calls.
 - The first run builds the Chroma index and may take a few minutes.
 
+### Required Environment Variables
+
+| Variable | Description |
+| -------- | ----------- |
+| `OPENAI_API_KEY` | Required for judge and embedding calls (or set custom vars via `judge_api_key_var`/`embed_api_key_var`) |
 
 ### Environment Arguments
 | Arg | Type | Default | Description |
@@ -67,3 +71,7 @@ Notes:
 | ToolRubric metrics | Tool execution success and format adherence |
 | JudgeRubric metrics | Judge-scored answer quality |
 
+### Changelog
+
+#### v0.1.22 (Jan 22, 2026)
+- Make ChromaDB initialization lazy to allow multiple env instances to run concurrently

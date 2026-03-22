@@ -6,6 +6,7 @@ This guide covers setup, testing, and contributing to the verifiers package.
 
 - [Setup](#setup)
 - [Project Structure](#project-structure)
+- [Prime CLI Plugin Export](#prime-cli-plugin-export)
 - [Running Tests](#running-tests)
 - [Writing Tests](#writing-tests)
 - [Contributing](#contributing)
@@ -16,7 +17,7 @@ This guide covers setup, testing, and contributing to the verifiers package.
 ## Setup
 
 ### Prerequisites
-- Python 3.10, 3.11, 3.12, or 3.13
+- Python 3.13 recommended for CI parity with Ty checks
 - [uv](https://docs.astral.sh/uv/) package manager
 
 ### Installation
@@ -32,7 +33,7 @@ uv sync
 # GPU-based trainer development:
 uv sync --all-extras
 
-# Install pre-commit hooks:
+# Install pre-commit hooks (including pre-push Ty gate):
 uv run pre-commit install
 ```
 
@@ -48,14 +49,45 @@ verifiers/
 │   ├── rubrics/        # Rubric classes
 │   ├── rl/             # Training infrastructure
 │   │   ├── inference/  # vLLM server utilities
-│   │   └── trainer/    # RLTrainer implementation
-│   ├── scripts/        # CLI entry points
+│   │   └── trainer/    # Trainer implementation
+│   ├── cli/            # Prime-facing CLI modules and plugin exports
+│   ├── scripts/        # Compatibility wrappers around verifiers/cli commands
 │   └── utils/          # Utilities
 ├── environments/       # Installable environment modules
 ├── configs/            # Example training configurations
 ├── tests/              # Test suite
 └── docs/               # Documentation
 ```
+
+## Prime CLI Plugin Export
+
+Verifiers exports a plugin consumed by `prime` so command behavior is sourced from verifiers modules.
+
+Entry point:
+
+```python
+from verifiers.cli.plugins.prime import get_plugin
+
+plugin = get_plugin()
+```
+
+The plugin exposes:
+
+- `api_version` (current: `1`)
+- command modules:
+  - `eval_module` (`verifiers.cli.commands.eval`)
+  - `gepa_module` (`verifiers.cli.commands.gepa`)
+  - `install_module` (`verifiers.cli.commands.install`)
+  - `init_module` (`verifiers.cli.commands.init`)
+  - `setup_module` (`verifiers.cli.commands.setup`)
+  - `build_module` (`verifiers.cli.commands.build`)
+- `build_module_command(module_name, args)` to construct subprocess invocation for a command module
+
+Contributor guidance:
+
+- Add new prime-facing command logic under `verifiers/cli/commands/`.
+- Export new command modules through `PrimeCLIPlugin` in `verifiers/cli/plugins/prime.py`.
+- Keep `verifiers/scripts/*` as thin compatibility wrappers that call into `verifiers/cli`.
 
 ## Running Tests
 
@@ -114,13 +146,12 @@ class TestFeature:
 
 ### Using Mocks
 
-The test suite provides mock OpenAI clients:
+The test suite provides a `MockClient` in `conftest.py` that implements the `Client` interface:
 
 ```python
-from tests.mock_openai_client import MockOpenAIClient
-
 def test_with_mock(mock_client):
-    env = vf.SingleTurnEnv(client=mock_client)
+    mock_client.set_default_responses(chat_response="test answer")
+    env = vf.SingleTurnEnv(client=mock_client, model="test", ...)
     # Test without real API calls
 ```
 
@@ -141,13 +172,15 @@ def test_with_mock(mock_client):
 3. **Make changes** following existing patterns
 4. **Add tests** for new functionality
 5. **Run tests**: `uv run pytest tests/`
-6. **Run linting**: `uv run ruff check --fix .`
-7. **Update docs** if adding/changing public APIs
-8. **Submit PR** with clear description
+6. **Install hooks once per clone**: `uv run pre-commit install`
+7. **Commit and push** (hooks run automatically on each commit/push)
+8. **Update docs** if adding/changing public APIs
+9. **Submit PR** with clear description
 
 ### Code Style
 
-- Strict `ruff` enforcement - all PRs must pass `ruff check --fix .`
+- Strict `ruff` enforcement via pre-commit hooks
+- `ty` runs in the pre-push hook via `uv run --python 3.13 ty check verifiers`
 - Use type hints for function parameters and returns
 - Write docstrings for public functions/classes
 - Keep functions focused and modular
@@ -156,8 +189,7 @@ def test_with_mock(mock_client):
 ### PR Checklist
 
 - [ ] Tests pass locally (`uv run pytest tests/`)
-- [ ] Linting passes (`uv run ruff check --fix .`)
-- [ ] Pre-commit hooks pass (`uv run pre-commit run --all-files`)
+- [ ] Pre-commit and pre-push hooks pass on latest commit/push
 - [ ] Added tests for new functionality
 - [ ] Updated documentation if needed
 
@@ -233,6 +265,7 @@ def load_environment(**kwargs):
 # Development setup
 uv sync                               # CPU-only
 uv sync --all-extras                  # With RL/training extras
+uv run pre-commit install             # One-time per clone (installs pre-commit + pre-push)
 
 # Run tests
 uv run pytest tests/                  # All tests
@@ -245,13 +278,14 @@ uv run pytest tests/test_envs.py -k math_python   # Specific environment
 
 # Linting
 uv run ruff check --fix .             # Fix lint errors
-uv run pre-commit run --all-files     # Run all pre-commit hooks
+uv run ruff format --check verifiers tests  # Verify Python formatting
+uv run ty check verifiers             # Type check (matches CI Ty target)
 
 # Environment tools
 prime env init new-env                       # Create environment
 prime env install new-env                    # Install environment
 prime eval run new-env -m gpt-4.1-mini -n 5  # Test environment
-prime eval tui                               # Browse eval results
+prime eval tui                               # Browse evals in the tree browser
 ```
 
 ### CLI Tools
@@ -262,7 +296,7 @@ prime eval tui                               # Browse eval results
 | `prime env init` | Initialize new environment from template |
 | `prime env install` | Install environment module |
 | `prime lab setup` | Set up training workspace |
-| `prime eval tui` | Terminal UI for browsing eval results |
+| `prime eval tui` | Terminal UI for browsing evals and rollout details |
 | `prime rl run` | Launch Hosted Training |
 | `uv run prime-rl` | Launch prime-rl training |
 

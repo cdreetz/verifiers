@@ -1,22 +1,24 @@
+import asyncio
 import logging
 from abc import abstractmethod
 from typing import final
 
-from openai import AsyncOpenAI
-
 import verifiers as vf
+from verifiers.clients import Client
 from verifiers.types import (
     Messages,
-    ModelResponse,
+    Response,
     RolloutInput,
     SamplingArgs,
     State,
     TrajectoryStep,
 )
-from verifiers.utils.message_utils import concat_messages
+from verifiers.utils.message_utils import (
+    concat_messages,
+    maybe_normalize_messages,
+)
 from verifiers.utils.response_utils import (
-    parse_is_truncated,
-    parse_response_messages,
+    parse_response_message,
     parse_response_tokens,
 )
 
@@ -73,12 +75,12 @@ class MultiTurnEnv(vf.Environment):
         """Override for rollouts with non-linear message sequences."""
         if len(state["trajectory"]) == 0:
             return state["prompt"]
-        else:
-            prev_turn_prompt = state["trajectory"][-1]["prompt"]
-            prev_turn_completion = state["trajectory"][-1]["completion"]
-            messages = concat_messages([prev_turn_prompt, prev_turn_completion])
-            env_response = await self.env_response(messages, state)
-            return concat_messages([messages, env_response])
+        prev_turn_prompt = state["trajectory"][-1]["prompt"]
+        prev_turn_completion = state["trajectory"][-1]["completion"]
+        messages = concat_messages([prev_turn_prompt, prev_turn_completion])
+        env_response = await self.env_response(messages, state)
+        env_response = maybe_normalize_messages(env_response, field_name="env_response")
+        return concat_messages([messages, env_response])
 
     async def render_completion(self, state: State):
         """Override for rollouts with non-linear message sequences."""
@@ -89,10 +91,13 @@ class MultiTurnEnv(vf.Environment):
         last_completion = state["trajectory"][-1]["completion"]
         full_conversation = concat_messages([last_prompt, last_completion])
         if state.get("final_env_response"):
-            full_conversation = concat_messages(
-                [full_conversation, state["final_env_response"]]
+            final_resp = state["final_env_response"]
+            final_resp = maybe_normalize_messages(
+                final_resp, field_name="final_env_response"
             )
-        state["completion"] = full_conversation[len(state["prompt"]) :]
+            full_conversation = concat_messages([full_conversation, final_resp])
+        prompt_messages = state["prompt"]
+        state["completion"] = full_conversation[len(prompt_messages) :]
 
     async def add_trajectory_step(self, state: State, trajectory_step: TrajectoryStep):
         """Override to set intermediate rewards, advantages, or extra metadata."""
@@ -102,13 +107,11 @@ class MultiTurnEnv(vf.Environment):
         self,
         state: State,
         prompt_messages: Messages,
-        response: ModelResponse,
+        response: Response,
     ):
-        completion_messages = await parse_response_messages(response, self.message_type)
-        response_is_truncated = await parse_is_truncated(response, self.message_type)
-        tokens = await parse_response_tokens(
-            response, self.message_type, self.max_seq_len
-        )
+        completion_messages = await parse_response_message(response)
+        tokens = await parse_response_tokens(response, self.max_seq_len)
+        response_is_truncated = response.message.is_truncated or False
         is_truncated = response_is_truncated or (
             tokens is not None and bool(tokens.get("is_truncated"))
         )
@@ -129,27 +132,35 @@ class MultiTurnEnv(vf.Environment):
     async def rollout(
         self,
         input: RolloutInput,
-        client: AsyncOpenAI,
+        client: Client,
         model: str,
         sampling_args: SamplingArgs | None = None,
     ) -> State:
         state = await self.init_state(input, client, model, sampling_args)
         try:
-            state = await self.setup_state(state)
-        except vf.Error as e:
-            state["error"] = e
-        while not await self.is_completed(state):
             try:
-                prompt_messages = await self.get_prompt_messages(state)
-                if state.get("final_env_response") is not None:
-                    continue
-                response = await self.get_model_response(state, prompt_messages)
-                await self.add_model_response(state, prompt_messages, response)
+                state = await self.setup_state(state)
             except vf.Error as e:
-                if isinstance(e, vf.OverlongPromptError):
-                    state["prompt_too_long"] = True
-                    state["is_truncated"] = True
-                else:
-                    state["error"] = e
-        await self.render_completion(state)
-        return state
+                state["error"] = e
+            # checks all @vf.stop methods, runs all @vf.cleanup methods if any are True
+            while not await self.is_completed(state):
+                try:
+                    prompt_messages = await self.get_prompt_messages(state)
+                    prompt_messages = maybe_normalize_messages(
+                        prompt_messages, field_name="prompt_messages"
+                    )
+                    if state.get("final_env_response") is not None:
+                        continue
+                    response = await self.get_model_response(state, prompt_messages)
+                    await self.add_model_response(state, prompt_messages, response)
+                except vf.Error as e:
+                    if isinstance(e, vf.OverlongPromptError):
+                        state["prompt_too_long"] = True
+                        state["is_truncated"] = True
+                    else:
+                        state["error"] = e
+            await self.render_completion(state)
+            return state
+        except asyncio.CancelledError:
+            await self._cleanup(state)
+            raise

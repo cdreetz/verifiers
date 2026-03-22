@@ -56,6 +56,7 @@ class TestCliAgentEnv:
         env = vf.CliAgentEnv(
             run_command="python agent.py",
             dataset=sample_dataset,
+            interception_port=8765,
             rubric=vf.Rubric(),
         )
         assert env.run_command == "python agent.py"
@@ -146,22 +147,6 @@ class TestCliAgentEnv:
         state = {"timing": {"start_time": time.time() - 20}}
         assert await env.timeout_reached(state) is True
 
-    def test_extract_tunnel_url_from_line(self, sample_dataset):
-        """Test tunnel URL extraction from cloudflared output."""
-        env = vf.CliAgentEnv(
-            run_command="python agent.py",
-            dataset=sample_dataset,
-            rubric=vf.Rubric(),
-        )
-
-        line = "2024-01-01 INFO: https://abc-xyz.trycloudflare.com is ready"
-        url = env.extract_tunnel_url_from_line(line)
-        assert url == "https://abc-xyz.trycloudflare.com"
-
-        line = "Some other log line without URL"
-        url = env.extract_tunnel_url_from_line(line)
-        assert url is None
-
     @pytest.mark.asyncio
     async def test_env_response_returns_empty(self, sample_dataset):
         """Test that env_response returns empty list."""
@@ -174,6 +159,49 @@ class TestCliAgentEnv:
         state = {}
         response = await env.env_response(messages, state)
         assert response == []
+
+    @pytest.mark.asyncio
+    async def test_non_streaming_intercept_tools_use_oai_schema(
+        self, sample_dataset, mock_client
+    ):
+        """OpenAI-formatted intercepted tools should work for non-streaming requests."""
+        env = vf.CliAgentEnv(
+            run_command="python agent.py",
+            dataset=sample_dataset,
+            rubric=vf.Rubric(),
+        )
+        state = await env.init_state(
+            input=sample_dataset[0],
+            client=mock_client,
+            model="test-model",
+        )
+        request_id = "req-test"
+        state["current_request_id"] = request_id
+        env._interception_server.intercepts[request_id] = {
+            "stream": False,
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "echo",
+                        "description": "echo tool",
+                        "parameters": {},
+                    },
+                }
+            ],
+        }
+
+        response = await env.get_model_response(
+            state=state,
+            prompt=sample_dataset[0]["prompt"],
+            client=mock_client,
+            model="test-model",
+        )
+
+        assert isinstance(response, vf.Response)
+        kwargs = mock_client.last_call_kwargs
+        assert kwargs["tools"] is not None
+        assert kwargs["tools"][0].name == "echo"
 
 
 class TestHarborEnv:

@@ -1,54 +1,256 @@
+from __future__ import annotations
+
+import asyncio
 import importlib.util
-import json
+import itertools
 import logging
+import math
+import os
+import threading
 import time
-from collections import Counter
-from contextlib import contextmanager
+from collections import Counter, defaultdict
+from collections.abc import Mapping
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
-from typing import cast
+from typing import Callable, cast
 
 import numpy as np
-from datasets import Dataset, disable_progress_bar, enable_progress_bar
+from datasets import disable_progress_bar, enable_progress_bar
 from datasets.utils import logging as ds_logging
 
 import verifiers as vf
-from verifiers.types import Endpoints, EvalConfig, GenerateMetadata, GenerateOutputs
+from verifiers.types import (
+    ClientType,
+    Endpoint,
+    Endpoints,
+    EvalConfig,
+    EvalRunConfig,
+    GenerateMetadata,
+    GenerateOutputs,
+    LogCallback,
+    ProgressCallback,
+    RolloutInput,
+    RolloutOutput,
+    StartCallback,
+)
 from verifiers.utils.async_utils import EventLoopLagMonitor
-from verifiers.utils.client_utils import setup_client
-from verifiers.utils.error_utils import ErrorChain
-from verifiers.utils.logging_utils import print_prompt_completions_sample, print_time
-from verifiers.utils.message_utils import messages_to_printable, sanitize_tool_calls
+from verifiers.utils.import_utils import load_toml
+from verifiers.utils.logging_utils import (
+    log_level,
+    print_prompt_completions_sample,
+    print_time,
+)
 from verifiers.utils.path_utils import get_eval_results_path
 
 logger = logging.getLogger(__name__)
 
 
+def _coerce_endpoint(raw_endpoint: object, source: str) -> Endpoint:
+    if not isinstance(raw_endpoint, dict):
+        raise ValueError(f"Endpoint entry must be a table/dict in {source}")
+
+    raw_endpoint_dict = cast(dict[str, object], raw_endpoint)
+    model = raw_endpoint_dict.get("model")
+    url = raw_endpoint_dict.get("url")
+    key = raw_endpoint_dict.get("key")
+
+    missing = [
+        field
+        for field, value in (("model", model), ("url", url), ("key", key))
+        if value is None
+    ]
+    if missing:
+        raise ValueError(f"Missing required field(s) {missing} in {source}")
+
+    if (
+        not isinstance(model, str)
+        or not isinstance(url, str)
+        or not isinstance(key, str)
+    ):
+        raise ValueError(
+            f"Fields 'model', 'url', and 'key' must all be strings in {source}"
+        )
+
+    endpoint = Endpoint(model=model, url=url, key=key)
+
+    if "client_type" in raw_endpoint_dict:
+        raise ValueError(
+            f"Field 'client_type' is no longer supported in {source}. "
+            "Use 'type' or 'api_client_type'."
+        )
+
+    short_client_type = raw_endpoint_dict.get("type")
+    long_client_type = raw_endpoint_dict.get("api_client_type")
+    if (
+        short_client_type is not None
+        and long_client_type is not None
+        and short_client_type != long_client_type
+    ):
+        raise ValueError(
+            f"Conflicting values for 'type' and 'api_client_type' in {source}"
+        )
+
+    client_type = (
+        short_client_type if short_client_type is not None else long_client_type
+    )
+    if client_type is not None:
+        if client_type not in (
+            "openai_completions",
+            "openai_chat_completions",
+            "openai_chat_completions_token",
+            "anthropic_messages",
+        ):
+            raise ValueError(
+                f"Field 'type'/'api_client_type' must be 'openai_completions' or 'openai_chat_completions' or 'openai_chat_completions_token' or 'anthropic_messages' in {source}"
+            )
+        endpoint["api_client_type"] = cast(ClientType, client_type)
+
+    return endpoint
+
+
+def _normalize_python_endpoints(raw_endpoints: object, source: Path) -> Endpoints:
+    if not isinstance(raw_endpoints, dict):
+        raise ValueError(f"ENDPOINTS must be a dict in {source}")
+
+    raw_endpoints_dict = cast(dict[str, object], raw_endpoints)
+    normalized: Endpoints = {}
+    for endpoint_id, raw_endpoint_group in raw_endpoints_dict.items():
+        if not isinstance(endpoint_id, str):
+            raise ValueError(f"Endpoint ids must be strings in {source}")
+
+        if isinstance(raw_endpoint_group, list):
+            if not raw_endpoint_group:
+                raise ValueError(
+                    f"Endpoint '{endpoint_id}' has an empty endpoint list in {source}"
+                )
+            normalized[endpoint_id] = [
+                _coerce_endpoint(
+                    raw_endpoint,
+                    source=f"{source} (ENDPOINTS['{endpoint_id}'])",
+                )
+                for raw_endpoint in raw_endpoint_group
+            ]
+        else:
+            normalized[endpoint_id] = [
+                _coerce_endpoint(
+                    raw_endpoint_group,
+                    source=f"{source} (ENDPOINTS['{endpoint_id}'])",
+                )
+            ]
+
+    return normalized
+
+
+def _normalize_toml_endpoints(raw_toml: object, source: Path) -> Endpoints:
+    if not isinstance(raw_toml, dict):
+        raise ValueError(f"Expected top-level TOML table in {source}")
+
+    raw_toml_dict = cast(dict[str, object], raw_toml)
+    raw_endpoint_entries = raw_toml_dict.get("endpoint", [])
+    if not isinstance(raw_endpoint_entries, list):
+        raise ValueError(
+            f"Expected [[endpoint]] array-of-tables in {source}, got {type(raw_endpoint_entries)}"
+        )
+
+    normalized: Endpoints = {}
+    for idx, raw_entry in enumerate(raw_endpoint_entries):
+        entry_source = f"{source} ([[endpoint]] index {idx})"
+        if not isinstance(raw_entry, dict):
+            raise ValueError(
+                f"Each [[endpoint]] entry must be a table in {entry_source}"
+            )
+
+        raw_entry_dict = cast(dict[str, object], raw_entry)
+        endpoint_id = raw_entry_dict.get("endpoint_id")
+        if not isinstance(endpoint_id, str) or not endpoint_id:
+            raise ValueError(
+                f"Each [[endpoint]] entry must include non-empty string 'endpoint_id' in {entry_source}"
+            )
+
+        url = raw_entry_dict.get("url")
+        api_base_url = raw_entry_dict.get("api_base_url")
+        if url is not None and api_base_url is not None and url != api_base_url:
+            raise ValueError(
+                f"Conflicting values for 'url' and 'api_base_url' in {entry_source}"
+            )
+
+        key = raw_entry_dict.get("key")
+        api_key_var = raw_entry_dict.get("api_key_var")
+        if key is not None and api_key_var is not None and key != api_key_var:
+            raise ValueError(
+                f"Conflicting values for 'key' and 'api_key_var' in {entry_source}"
+            )
+
+        endpoint_payload = {
+            k: v for k, v in raw_entry_dict.items() if k != "endpoint_id"
+        }
+        endpoint_payload["url"] = url if url is not None else api_base_url
+        endpoint_payload["key"] = key if key is not None else api_key_var
+        endpoint = _coerce_endpoint(
+            endpoint_payload,
+            source=f"{entry_source} (endpoint_id={endpoint_id!r})",
+        )
+        normalized.setdefault(endpoint_id, []).append(endpoint)
+
+    return normalized
+
+
+def resolve_endpoints_file(endpoints_path: str) -> Path | None:
+    endpoints_path_obj = Path(endpoints_path)
+    if endpoints_path_obj.is_dir():
+        toml_file = endpoints_path_obj / "endpoints.toml"
+        python_file = endpoints_path_obj / "endpoints.py"
+        if toml_file.exists():
+            return toml_file
+        if python_file.exists():
+            return python_file
+        return None
+    return endpoints_path_obj
+
+
 def load_endpoints(endpoints_path: str):
     try:
-        endpoints_path_obj = Path(endpoints_path)
-        if endpoints_path_obj.is_dir():
-            endpoints_file = endpoints_path_obj / "endpoints.py"
-        else:
-            endpoints_file = endpoints_path_obj
+        endpoints_file = resolve_endpoints_file(endpoints_path)
+        if endpoints_file is None:
+            raise ImportError(
+                f"Neither endpoints.py nor endpoints.toml found at {endpoints_path}"
+            )
 
         if endpoints_file.exists():
             logger.debug(f"Loading endpoint registry from {endpoints_file}")
-            spec = importlib.util.spec_from_file_location("endpoints", endpoints_file)
-            assert spec and spec.loader
-            endpoints_module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(endpoints_module)
-            # check that module exposes ENDPOINTS
-            if not hasattr(endpoints_module, "ENDPOINTS"):
-                raise AttributeError(
-                    f"Module '{endpoints_file}' does not have a 'ENDPOINTS' attribute"
+            if endpoints_file.suffix == ".py":
+                spec = importlib.util.spec_from_file_location(
+                    "endpoints", endpoints_file
                 )
-            endpoints = cast(Endpoints, endpoints_module.ENDPOINTS)
+                assert spec and spec.loader
+                endpoints_module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(endpoints_module)
+                # check that module exposes ENDPOINTS
+                if not hasattr(endpoints_module, "ENDPOINTS"):
+                    raise AttributeError(
+                        f"Module '{endpoints_file}' does not have a 'ENDPOINTS' attribute"
+                    )
+                endpoints = _normalize_python_endpoints(
+                    cast(object, endpoints_module.ENDPOINTS),
+                    source=endpoints_file,
+                )
+            elif endpoints_file.suffix == ".toml":
+                with open(endpoints_file, "rb") as f:
+                    raw_toml = load_toml(f)
+                endpoints = _normalize_toml_endpoints(raw_toml, source=endpoints_file)
+            else:
+                raise ImportError(
+                    f"Unsupported endpoints file extension '{endpoints_file.suffix}' at {endpoints_file}"
+                )
+            num_endpoint_variants = sum(len(group) for group in endpoints.values())
             logger.debug(
-                f"Successfully loaded {len(endpoints)} endpoints from registry"
+                "Successfully loaded %d endpoint ids (%d endpoint variant(s)) from registry",
+                len(endpoints),
+                num_endpoint_variants,
             )
         else:
-            raise ImportError(f"endpoints.py not found at {endpoints_file}")
-    except (ImportError, AttributeError) as e:
+            raise ImportError(f"Endpoint registry file not found at {endpoints_file}")
+    except (ImportError, AttributeError, ValueError) as e:
         logger.warning(
             f"No local endpoint registry found at {endpoints_path}. "
             f"Please specify the model name (-m), API host base URL (-b), and API key variable name (-k). "
@@ -59,54 +261,318 @@ def load_endpoints(endpoints_path: str):
     return endpoints
 
 
-def get_results_by_task(results: GenerateOutputs) -> dict[str, GenerateOutputs]:
-    """Group results by task name.
+def _expand_ablation(ablation: dict, global_defaults: dict) -> list[dict]:
+    """Expand an [[ablation]] block into eval configs via cartesian product.
 
-    Args:
-        results: The GenerateOutputs from an evaluation run.
+    Sweep keys are lists of values under [ablation.sweep]. Environment args
+    can be swept via [ablation.sweep.env_args]. All sweep dimensions are
+    crossed to produce one eval config per combination.
 
-    Returns:
-        A dictionary mapping task names to their corresponding GenerateOutputs.
+    Example TOML:
+        [[ablation]]
+        env_id = "my-env"
+
+        [ablation.sweep]
+        temperature = [0.0, 0.5]
+
+        [ablation.sweep.env_args]
+        difficulty = ["easy", "hard"]
+
+    This produces 4 eval configs (2 temperatures × 2 difficulties).
     """
-    task_indices: dict[str, list[int]] = {}
-    for i, task in enumerate(results["task"]):
-        if task not in task_indices:
-            task_indices[task] = []
-        task_indices[task].append(i)
+    ablation = dict(ablation)  # don't mutate caller's dict
+    sweep = ablation.pop("sweep", {})
+    sweep = dict(sweep)  # copy before mutating
+    env_args_sweep = sweep.pop("env_args", {})
 
-    task_results: dict[str, GenerateOutputs] = {}
-    for task, indices in task_indices.items():
-        task_results[task] = GenerateOutputs(
-            prompt=[results["prompt"][i] for i in indices],
-            completion=[results["completion"][i] for i in indices],
-            answer=[results["answer"][i] for i in indices],
-            state=[results["state"][i] for i in indices],
-            task=[results["task"][i] for i in indices],
-            info=[results["info"][i] for i in indices],
-            example_id=[results["example_id"][i] for i in indices],
-            reward=[results["reward"][i] for i in indices],
-            metrics={k: [v[i] for i in indices] for k, v in results["metrics"].items()},
-            stop_conditions=[results["stop_conditions"][i] for i in indices],
-            is_truncated=[results["is_truncated"][i] for i in indices],
-            metadata=results["metadata"],
+    # Collect all sweep dimensions: [(key, [values]), ...]
+    dimensions: list[tuple[str, list]] = []
+    for key, values in sweep.items():
+        if not isinstance(values, list):
+            raise ValueError(
+                f"Ablation sweep values must be lists, got {type(values).__name__} "
+                f"for '{key}'"
+            )
+        dimensions.append((key, values))
+    for key, values in env_args_sweep.items():
+        if not isinstance(values, list):
+            raise ValueError(
+                f"Ablation sweep.env_args values must be lists, got "
+                f"{type(values).__name__} for '{key}'"
+            )
+        dimensions.append((f"env_args.{key}", values))
+
+    if not dimensions:
+        raise ValueError(
+            "[[ablation]] block must have a non-empty [ablation.sweep] section"
         )
-    return task_results
+
+    # Guard against same key in both fixed env_args and sweep.env_args
+    fixed_env_args = ablation.get("env_args", {})
+    if fixed_env_args and env_args_sweep:
+        overlap = set(fixed_env_args.keys()) & set(env_args_sweep.keys())
+        if overlap:
+            raise ValueError(
+                f"env_args key(s) {overlap} appear in both fixed env_args and "
+                f"sweep.env_args — use one or the other"
+            )
+
+    # Fixed fields: global defaults overridden by ablation-level fields
+    fixed = {**global_defaults, **ablation}
+
+    # Expand cartesian product
+    keys = [k for k, _ in dimensions]
+    value_lists = [v for _, v in dimensions]
+
+    expanded = []
+    for combo in itertools.product(*value_lists):
+        config = {k: (dict(v) if isinstance(v, dict) else v) for k, v in fixed.items()}
+        for key, value in zip(keys, combo):
+            if key.startswith("env_args."):
+                env_key = key[len("env_args.") :]
+                config["env_args"] = {**config.get("env_args", {}), env_key: value}
+            else:
+                config[key] = value
+        expanded.append(config)
+
+    return expanded
+
+
+def load_toml_config(path: Path) -> list[dict]:
+    """Loads and validates a TOML config file.
+
+    Config format supports global defaults at the top level, with per-eval overrides
+    and ablation sweeps:
+
+        # Global defaults (optional)
+        model = "openai/gpt-4.1-mini"
+        num_examples = 10
+
+        [[eval]]
+        env_id = "gsm8k"
+
+        [[eval]]
+        env_id = "math-python"
+        num_examples = 5  # overrides global default
+
+        # Ablation: cartesian product of sweep values
+        [[ablation]]
+        env_id = "my-env"
+
+        [ablation.sweep]
+        temperature = [0.0, 0.5, 1.0]
+
+        [ablation.sweep.env_args]
+        difficulty = ["easy", "hard"]
+        # → 6 eval configs
+    """
+    if not path.exists():
+        raise FileNotFoundError(f"Config file not found: {path}")
+
+    with open(path, "rb") as f:
+        raw_config = load_toml(f)
+
+    # validate schema
+    eval_list = raw_config.get("eval", [])
+    ablation_list = raw_config.get("ablation", [])
+
+    if not isinstance(eval_list, list):
+        raise ValueError(
+            f"Config file uses [eval] but should use [[eval]] (double brackets) "
+            f"for array of tables: {path}"
+        )
+    if not isinstance(ablation_list, list):
+        raise ValueError(
+            f"Config file uses [ablation] but should use [[ablation]] (double brackets) "
+            f"for array of tables: {path}"
+        )
+    if not eval_list and not ablation_list:
+        raise ValueError(
+            f"Config file must contain at least one [[eval]] or [[ablation]] section: {path}"
+        )
+
+    if not all("env_id" in e for e in eval_list):
+        raise ValueError(f"All [[eval]] sections must contain an env_id field: {path}")
+
+    # extract global defaults (everything except 'eval' and 'ablation' keys)
+    global_defaults = {
+        k: v for k, v in raw_config.items() if k not in ("eval", "ablation")
+    }
+
+    # valid fields mirror cli args, not evalconfig
+    # TODO: properly tie EvalConfig to CLI
+    valid_fields = {
+        # environment
+        "env_id",
+        "env_args",
+        "env_dir_path",
+        "endpoints_path",
+        "extra_env_kwargs",
+        # model/client
+        "provider",
+        "endpoint_id",
+        "model",
+        "api_client_type",
+        "api_key_var",
+        "api_base_url",
+        "header",
+        # sampling
+        "sampling_args",
+        "max_tokens",
+        "temperature",
+        # evaluation
+        "num_examples",
+        "rollouts_per_example",
+        "max_concurrent",
+        "independent_scoring",
+        "max_retries",
+        "disable_env_server",
+        # logging
+        "verbose",
+        "debug",
+        # saving
+        "output_dir",
+        "state_columns",
+        "save_results",
+        "resume",
+        "resume_path",
+        "save_to_hf_hub",
+        "hf_hub_dataset_name",
+    }
+
+    # validate global fields
+    if global_defaults:
+        invalid_global = set(global_defaults.keys()) - valid_fields
+        if invalid_global:
+            raise ValueError(
+                f"Invalid global field(s) {invalid_global}. "
+                f"Valid fields are: {sorted(valid_fields)}"
+            )
+
+    # merge global defaults with per-eval configs
+    merged_eval_list: list[dict] = []
+    for eval_config in eval_list:
+        invalid_fields = set(eval_config.keys()) - valid_fields
+        if invalid_fields:
+            raise ValueError(
+                f"Invalid field(s) {invalid_fields} for {eval_config.get('env_id', 'unknown')}. "
+                f"Valid fields are: {sorted(valid_fields)}"
+            )
+        # global defaults, then per-eval overrides
+        merged = {**global_defaults, **eval_config}
+        merged_eval_list.append(merged)
+
+    # expand [[ablation]] blocks into eval configs
+    for ablation in ablation_list:
+        # Validate fixed fields (everything except 'sweep')
+        ablation_fixed_keys = set(ablation.keys()) - {"sweep"}
+        invalid_fields = ablation_fixed_keys - valid_fields
+        if invalid_fields:
+            raise ValueError(
+                f"Invalid field(s) {invalid_fields} in [[ablation]] block. "
+                f"Valid fields are: {sorted(valid_fields)}"
+            )
+        # Validate sweep keys (except env_args which has freeform sub-keys)
+        sweep = ablation.get("sweep", {})
+        invalid_sweep = set(sweep.keys()) - valid_fields - {"env_args"}
+        if invalid_sweep:
+            raise ValueError(
+                f"Invalid sweep field(s) {invalid_sweep} in [[ablation]] block. "
+                f"Valid fields are: {sorted(valid_fields)}"
+            )
+        expanded = _expand_ablation(ablation, global_defaults)
+        merged_eval_list.extend(expanded)
+
+    # Validate all expanded configs have env_id
+    for config in merged_eval_list:
+        if "env_id" not in config:
+            raise ValueError(
+                "All eval configs (including expanded ablations) must have an env_id"
+            )
+
+    # Resolve endpoints_path relative to the config file location
+    for merged in merged_eval_list:
+        endpoints_path = merged.get("endpoints_path")
+        if isinstance(endpoints_path, str):
+            endpoints_path_obj = Path(endpoints_path)
+            if not endpoints_path_obj.is_absolute():
+                merged["endpoints_path"] = str(
+                    (path.parent / endpoints_path_obj).resolve()
+                )
+
+    return merged_eval_list
+
+
+def filter_inputs(
+    inputs: list[RolloutInput], outputs: list[RolloutOutput], rollouts_per_example: int
+) -> list[RolloutInput]:
+    """Filter inputs based on the number of rollouts per example."""
+    inputs_by_example_id, outputs_by_example_id = defaultdict(list), defaultdict(list)
+    for input in inputs:
+        inputs_by_example_id[input["example_id"]].append(input)
+    for output in outputs:
+        outputs_by_example_id[output["example_id"]].append(output)
+
+    filtered_inputs: list[RolloutInput] = []
+    for example_id in inputs_by_example_id.keys():
+        example_inputs = inputs_by_example_id[example_id]
+        example_outputs = outputs_by_example_id[example_id]
+        rollouts_left = rollouts_per_example - len(example_outputs)
+        if rollouts_left > 0:
+            filtered_inputs.extend(example_inputs[:rollouts_left])
+
+    return filtered_inputs
+
+
+def to_col_order(list_of_dicts: list[Mapping[str, float]]) -> dict[str, list[float]]:
+    """Convert a list of mappings to a dictionary of lists, ordered by the keys of the first mapping."""
+    if not list_of_dicts:
+        return {}
+    return {k: [m[k] for m in list_of_dicts] for k in list_of_dicts[0].keys()}
+
+
+def get_task_outputs(results: GenerateOutputs, task: str) -> GenerateOutputs:
+    """Get only the rollouts for a given task."""
+    outputs = [o for o in results["outputs"] if o["task"] == task]
+    return GenerateOutputs(
+        outputs=outputs,
+        metadata=results["metadata"],  # duplicate metadata
+    )
 
 
 def print_rewards(results: GenerateOutputs):
+    rewards = [o["reward"] for o in results["outputs"]]
     print("Rewards:")
     print(
-        f"reward: avg - {sum(results['reward']) / len(results['reward']):.3f}, std - {np.std(results['reward']):.3f}"
+        f"reward: avg - {sum(rewards) / len(rewards):.3f}, std - {np.std(rewards):.3f}"
     )
     r = results["metadata"]["rollouts_per_example"]
-    n = len(results["reward"]) // r
+    n = len(rewards) // r
     # results are sorted by example_id, so rollout i is at indices [i, i+r, i+2r, ...]
     for i in range(r):
-        trials = [round(results["reward"][i + (j * r)], 3) for j in range(n)]
+        trials = [round(rewards[i + (j * r)], 3) for j in range(n)]
         out = f"r{i + 1}: {trials}"
         print(out)
-    for k in results["metrics"]:
-        v = results["metrics"][k]
+
+    pass_at_k = results["metadata"].get("pass_at_k", {})
+    pass_all_k = results["metadata"].get("pass_all_k", {})
+    if pass_at_k:
+        parts = [
+            f"{k}={v:.3f}"
+            for k, v in sorted(pass_at_k.items(), key=lambda x: int(x[0]))
+        ]
+        print(f"pass@k: {', '.join(parts)}")
+    if pass_all_k:
+        parts = [
+            f"{k}={v:.3f}"
+            for k, v in sorted(pass_all_k.items(), key=lambda x: int(x[0]))
+        ]
+        print(f"pass^k: {', '.join(parts)}")
+
+    metrics = [o["metrics"] for o in results["outputs"]]
+    metrics_col = to_col_order(metrics)
+    for k in metrics_col.keys():
+        v = metrics_col[k]
         print(f"{k}: avg - {sum(v) / len(v):.3f}, std - {np.std(v):.3f}")
         for i in range(r):
             trials = [round(v[i + (j * r)], 3) for j in range(n)]
@@ -115,34 +581,36 @@ def print_rewards(results: GenerateOutputs):
 
 
 def print_info(results: GenerateOutputs):
+    is_truncated = [o["is_truncated"] for o in results["outputs"]]
     print("Info:")
     print(
-        f"is_truncated: avg - {np.mean(results['is_truncated']):.3f}, std - {np.std(results['is_truncated']):.3f}"
+        f"is_truncated: avg - {np.mean(is_truncated):.3f}, std - {np.std(is_truncated):.3f}"
     )
-    counter = Counter(results["stop_conditions"])
+    stop_conditions = [o["stop_condition"] for o in results["outputs"]]
+    counter = Counter(stop_conditions)
     print(
         f"stop_conditions: {', '.join([f'{k}: {v / counter.total():.3f}' for k, v in counter.items()])}"
     )
-    errors = [s.get("error") for s in results["state"]]
+    errors = [o.get("error") for o in results["outputs"]]
     has_errors = [e is not None for e in errors]
     if any(has_errors):
         print(
             f"errors: avg - {np.mean(has_errors):.3f}, std - {np.std(has_errors):.3f}"
         )
-        errors = [e for e in errors if e is not None]
-        error_chains = [ErrorChain(e) for e in errors]
+        error_chains = [e["error_chain_str"] for e in errors if e is not None]
+        # Errors are serialized as strings, count unique error types
         counter = Counter(error_chains)
-        for error_chain, count in counter.items():
-            print(f" - {repr(error_chain)}: {count / counter.total():.3f}")
+        for error_str, count in counter.items():
+            print(f" - {error_str}: {count / counter.total():.3f}")
 
 
 def print_timing(results: GenerateOutputs):
     print("Timing:")
-    generation_ms_arr = np.array(
-        [s["timing"]["generation_ms"] for s in results["state"]]
-    )
-    scoring_ms_arr = np.array([s["timing"]["scoring_ms"] for s in results["state"]])
-    total_ms_arr = np.array([s["timing"]["total_ms"] for s in results["state"]])
+    timing = [o["timing"] for o in results["outputs"]]
+    timing_col = to_col_order(timing)
+    generation_ms_arr = np.array(timing_col["generation_ms"])
+    scoring_ms_arr = np.array(timing_col["scoring_ms"])
+    total_ms_arr = np.array(timing_col["total_ms"])
     generation_arr = generation_ms_arr / 1000
     scoring_arr = scoring_ms_arr / 1000
     total_arr = total_ms_arr / 1000
@@ -158,11 +626,36 @@ def print_timing(results: GenerateOutputs):
     )
 
 
-def print_results(
-    results: GenerateOutputs,
-    event_loop_lags: list[float] | None = None,
-    num_samples: int = 1,
-):
+def print_usage(results: GenerateOutputs):
+    usage_count = 0
+    input_tokens_total = 0.0
+    output_tokens_total = 0.0
+    for output in results["outputs"]:
+        token_usage = output.get("token_usage")
+        if not isinstance(token_usage, Mapping):
+            continue
+        usage_count += 1
+        input_tokens_total += float(token_usage.get("input_tokens", 0.0))
+        output_tokens_total += float(token_usage.get("output_tokens", 0.0))
+
+    usage = None
+    if usage_count > 0:
+        usage = {
+            "input_tokens": input_tokens_total / usage_count,
+            "output_tokens": output_tokens_total / usage_count,
+        }
+    elif results["metadata"].get("usage") is not None:
+        usage = results["metadata"]["usage"]
+
+    if usage is None:
+        return
+
+    print("Usage:")
+    print(f"input_tokens (avg): {usage['input_tokens']:.3f}")
+    print(f"output_tokens (avg): {usage['output_tokens']:.3f}")
+
+
+def print_results(results: GenerateOutputs, num_samples: int = 1):
     assert results["metadata"] is not None
     print("--- Evaluation ---")
     print(f"Environment: {results['metadata']['env_id']}")
@@ -172,14 +665,18 @@ def print_results(
     print(f"Rollouts per example: {results['metadata']['rollouts_per_example']}")
     print("--- Example ---")
 
-    printable_prompts = [messages_to_printable(p) for p in results["prompt"]]
-    printable_completions = [messages_to_printable(c) for c in results["completion"]]
-    errors = [s.get("error") for s in results["state"]]
+    # prompt/completion are already in printable format from state_to_output
+    printable_prompts = [o["prompt"] if o["prompt"] else [] for o in results["outputs"]]
+    printable_completions = [
+        o["completion"] if o["completion"] else [] for o in results["outputs"]
+    ]
+    rewards = [o["reward"] for o in results["outputs"]]
+    errors = [o.get("error") for o in results["outputs"]]
     print_prompt_completions_sample(
         printable_prompts,
         printable_completions,
         errors,
-        results["reward"],
+        rewards,
         step=0,
         num_samples=num_samples,
     )
@@ -187,145 +684,21 @@ def print_results(
     print_rewards(results)
     print_info(results)
     print_timing(results)
+    print_usage(results)
 
-    num_tasks = len(set(results["task"]))
-    if num_tasks > 1:
-        task_results = get_results_by_task(results)
-        for task, task_results in task_results.items():
+    tasks = set([o["task"] for o in results["outputs"]])
+    if len(tasks) > 1:
+        for task in tasks:
+            task_results = get_task_outputs(results, task)
             print(f"\n--- {task} ---")
             print_rewards(task_results)
             print_info(task_results)
             print_timing(task_results)
-
-    if event_loop_lags:
-        print("\nPerformance:")
-        event_loop_lags_arr = np.array(event_loop_lags)
-        med_lag, p90_lag, max_lag = (
-            np.median(event_loop_lags_arr),
-            np.percentile(event_loop_lags_arr, 90),
-            np.max(event_loop_lags_arr),
-        )
-        print(
-            f"event_loop_lag: med - {print_time(float(med_lag))}, p90 - {print_time(float(p90_lag))}, max - {print_time(float(max_lag))}"
-        )
+            print_usage(task_results)
 
 
-async def run_evaluation(config: EvalConfig) -> GenerateOutputs:
-    # set up AsyncOpenAI client with high limits to prevent timeouts
-    client = setup_client(
-        config.client_config,
-    )
-    logger.debug(
-        f"Initialized AsyncOpenAI client with base_url: {config.client_config.api_base_url}"
-    )
-
-    # load environment
-    vf_env = vf.load_environment(env_id=config.env_id, **config.env_args)
-
-    # load event loop lag monitor
-    event_loop_lag_monitor = EventLoopLagMonitor()
-    event_loop_lag_monitor.run_in_background()
-
-    # set extra environment kwargs
-    if config.extra_env_kwargs:
-        logger.info(f"Setting extra environment kwargs: {config.extra_env_kwargs}")
-        vf_env.set_kwargs(**config.extra_env_kwargs)
-
-    # run evaluation
-    results_path = get_eval_results_path(config)
-    logger.info(f"Starting evaluation with model: {config.model}")
-    logger.info(
-        f"Configuration: num_examples={config.num_examples}, rollouts_per_example={config.rollouts_per_example}, max_concurrent={config.max_concurrent}"
-    )
-    start_time = time.time()
-    results = await vf_env.evaluate(
-        client=client,
-        model=config.model,
-        sampling_args=config.sampling_args,
-        num_examples=config.num_examples,
-        rollouts_per_example=config.rollouts_per_example,
-        max_concurrent=config.max_concurrent,
-        max_concurrent_generation=config.max_concurrent_generation,
-        max_concurrent_scoring=config.max_concurrent_scoring,
-        results_path=results_path,
-        state_columns=config.state_columns,
-        save_results=config.save_results,
-        save_every=config.save_every,
-        independent_scoring=config.independent_scoring,
-    )
-    end_time = time.time()
-    logger.info(f"Evaluation completed in {end_time - start_time:.2f} seconds")
-
-    event_loop_lags = event_loop_lag_monitor.get_lags()
-
-    if config.print_results:
-        print_results(results, event_loop_lags)
-    if config.save_results:
-        save_rollout_results(results, config.save_to_hf_hub, config.hf_hub_dataset_name)
-    return results
-
-
-def sanitize_metadata(metadata: GenerateMetadata) -> dict:
-    metadata_dict = dict(metadata)
-    metadata_dict.pop("path_to_save")
-    metadata_dict.pop("date")
-
-    return metadata_dict
-
-
-def get_hf_hub_dataset_name(results: GenerateOutputs) -> str:
-    metadata = results["metadata"]
-    dataset_name = (
-        metadata["env_id"]
-        + "_"
-        + metadata["model"].replace("/", "_")
-        + "_n"
-        + str(metadata["num_examples"])
-        + "_r"
-        + str(metadata["rollouts_per_example"])
-    )
-    return dataset_name
-
-
-def make_dataset(results: GenerateOutputs, **kwargs) -> Dataset:
-    clean_prompts = [messages_to_printable(p) for p in results["prompt"]]
-    clean_prompts = [sanitize_tool_calls(p) for p in clean_prompts]
-    clean_completions = [messages_to_printable(c) for c in results["completion"]]
-    clean_completions = [sanitize_tool_calls(c) for c in clean_completions]
-    save_info = any(info != {} for info in results["info"])
-    save_answer = any(answer != "" for answer in results["answer"])
-    errors = [s.get("error") for s in results["state"]]
-    results_dict = {
-        "example_id": results["example_id"],
-        "prompt": clean_prompts,
-        "completion": clean_completions,
-        "task": results["task"],
-        "reward": results["reward"],
-        "error": [repr(e) if e is not None else None for e in errors],
-        "generation_ms": [s["timing"]["generation_ms"] for s in results["state"]],
-        "scoring_ms": [s["timing"]["scoring_ms"] for s in results["state"]],
-        "total_ms": [s["timing"]["total_ms"] for s in results["state"]],
-    }
-    if save_info:
-        results_dict["info"] = results["info"]
-    if save_answer:
-        results_dict["answer"] = results["answer"]
-    for k in results["metrics"]:
-        v = results["metrics"][k]
-        results_dict[k] = v
-
-    # Add selected state columns if specified
-    state_columns = results["metadata"]["state_columns"]
-    if state_columns:
-        for col in state_columns:
-            if col == "responses":
-                results_dict[col] = [
-                    [r.model_dump() for r in s.get(col, [])] for s in results["state"]
-                ]
-            else:
-                results_dict[col] = [s.get(col) for s in results["state"]]
-
-    return Dataset.from_dict(results_dict)
+def get_log_level(verbose: bool) -> str:
+    return "DEBUG" if verbose else os.getenv("VF_LOG_LEVEL", "INFO")
 
 
 @contextmanager
@@ -340,26 +713,286 @@ def quiet_datasets():
         enable_progress_bar()
 
 
-def save_to_disk(dataset: Dataset, metadata_dict: dict, path_to_save: Path):
-    path_to_save.parent.mkdir(parents=True, exist_ok=True)
-    with quiet_datasets():
-        dataset.to_json(path_to_save / "results.jsonl")
-    with open(path_to_save / "metadata.json", "w") as f:
-        json.dump(metadata_dict, f)
+async def run_evaluation(
+    config: EvalConfig,
+    on_start: StartCallback | None = None,
+    on_log_file: Callable[[Path], None] | None = None,
+    on_progress: ProgressCallback | list[ProgressCallback] | None = None,
+    on_log: LogCallback | None = None,
+) -> GenerateOutputs:
+    # load environment
+    maybe_suppress_logs = (
+        log_level(logging.CRITICAL) if not config.disable_env_server else nullcontext()
+    )
+    with maybe_suppress_logs:
+        vf_env = vf.load_environment(env_id=config.env_id, **config.env_args)
+
+    # set extra environment kwargs
+    if config.extra_env_kwargs:
+        logger.info(f"Setting extra environment kwargs: {config.extra_env_kwargs}")
+        vf_env.set_kwargs(**config.extra_env_kwargs)
+
+    results_path = config.resume_path or get_eval_results_path(config)
+
+    try:
+        if not config.disable_env_server:
+            extra_env_kwargs = dict(config.extra_env_kwargs)
+            if "concurrency" not in extra_env_kwargs:
+                if config.max_concurrent <= 0:
+                    concurrency = config.num_examples * config.rollouts_per_example
+                else:
+                    concurrency = config.max_concurrent
+
+                logger.info(f"Automatically determined {concurrency=}")
+                extra_env_kwargs["concurrency"] = concurrency
+
+            log_file = results_path / "eval.log"
+            log_file.parent.mkdir(parents=True, exist_ok=True)
+            if config.debug:
+                await vf_env.start_server(
+                    extra_env_kwargs=extra_env_kwargs,
+                    log_level=get_log_level(config.verbose),
+                    log_file=str(log_file),
+                    log_file_level=get_log_level(config.verbose),
+                )
+            else:
+                await vf_env.start_server(
+                    extra_env_kwargs=extra_env_kwargs,
+                    log_level="CRITICAL",  # disable console logging
+                    log_file=str(log_file),
+                    log_file_level=get_log_level(config.verbose),
+                )
+            if on_log_file is not None:
+                on_log_file(log_file)
+
+        logger.debug(f"Starting evaluation with model: {config.model}")
+        logger.debug(
+            f"Configuration: num_examples={config.num_examples}, rollouts_per_example={config.rollouts_per_example}, max_concurrent={config.max_concurrent}"
+        )
+
+        effective_group_max_concurrent = config.max_concurrent
+        if (
+            not config.independent_scoring
+            and config.max_concurrent > 0
+            and config.rollouts_per_example > 1
+        ):
+            # Grouped scoring applies the semaphore at group level. Convert
+            # rollout-level concurrency to group-level slots.
+            effective_group_max_concurrent = math.ceil(
+                config.max_concurrent / config.rollouts_per_example
+            )
+            if config.num_examples > 0:
+                effective_group_max_concurrent = min(
+                    effective_group_max_concurrent, config.num_examples
+                )
+
+        outputs = await vf_env.evaluate(
+            client=config.client_config,
+            model=config.model,
+            sampling_args=config.sampling_args,
+            num_examples=config.num_examples,
+            rollouts_per_example=config.rollouts_per_example,
+            max_concurrent=effective_group_max_concurrent,
+            results_path=results_path,
+            state_columns=config.state_columns,
+            save_results=config.save_results,
+            push_to_hf_hub=config.save_to_hf_hub,
+            hf_hub_dataset_name=config.hf_hub_dataset_name,
+            independent_scoring=config.independent_scoring,
+            max_retries=config.max_retries,
+            on_start=on_start,
+            on_progress=on_progress,
+            on_log=on_log,
+        )
+    finally:
+        if not config.disable_env_server:
+            await vf_env.stop_server()
+
+    return outputs
 
 
-def save_rollout_results(
-    results: GenerateOutputs,
-    push_to_hf_hub: bool = False,
-    hf_hub_dataset_name: str | None = None,
-):
-    path_to_save = results["metadata"]["path_to_save"]
-    path_to_save.parent.mkdir(parents=True, exist_ok=True)
-    dataset = make_dataset(results)
-    metadata_dict = sanitize_metadata(results["metadata"])
-    save_to_disk(dataset, metadata_dict, path_to_save)
-    logger.info(f"Results saved to {path_to_save}")
-    if push_to_hf_hub:
-        dataset_name = hf_hub_dataset_name or get_hf_hub_dataset_name(results)
-        dataset.push_to_hub(dataset_name)
-        logger.info(f"Dataset saved to Hugging Face Hub: {dataset_name}")
+async def run_evaluations(config: EvalRunConfig) -> None:
+    # load event loop lag monitor
+    event_loop_lag_monitor = EventLoopLagMonitor(max_measurements=int(1e5))
+    lag_monitor_task = asyncio.create_task(event_loop_lag_monitor.run())
+
+    on_progress: list[ProgressCallback] | None = None
+    if config.heartbeat_url is not None:
+        from verifiers.utils.heartbeat import Heartbeat
+
+        heart = Heartbeat(config.heartbeat_url)
+        on_progress = [lambda *_a, **_kw: asyncio.create_task(heart.beat())]
+
+    start_time = time.time()
+    all_results = await asyncio.gather(
+        *[
+            run_evaluation(eval_config, on_progress=on_progress)
+            for eval_config in config.evals
+        ]
+    )
+    end_time = time.time()
+
+    lag_monitor_task.cancel()
+
+    if config.heartbeat_url is not None:
+        await heart.close()
+
+    lags = event_loop_lag_monitor.lags
+    logger.info(f"Evaluation completed in {end_time - start_time:.2f} seconds")
+
+    for results in all_results:
+        print_results(results)
+
+    n = len(lags)
+    if n > 0:
+        lags_arr = np.array(lags)
+        mean_lag = float(lags_arr.mean())
+        p99_lag = float(np.percentile(lags_arr, 99))
+        max_lag = float(lags_arr.max())
+        print(
+            f"\nPerformance:\nevent_loop_lag: mean={print_time(mean_lag)}, p99={print_time(p99_lag)}, max={print_time(max_lag)} (n={n})"
+        )
+
+
+async def run_evaluations_tui(
+    config: EvalRunConfig, tui_mode: bool = True, compact: bool = False
+) -> None:
+    """Run multi-environment evaluation with a Rich display.
+
+    Args:
+        config: Evaluation run configuration.
+        tui_mode: If True, use alternate screen (--tui flag). If False, refresh in-place.
+        compact: If True, show compact summary (settings + stats, skip example prompts).
+    """
+    from verifiers.utils.eval_display import EvalDisplay, is_tty
+
+    # fall back to non-display mode if not a tty
+    if not is_tty():
+        logger.debug("Not a TTY, falling back to standard output")
+        await run_evaluations(config)
+        return
+
+    heart = None
+    if config.heartbeat_url is not None:
+        from verifiers.utils.heartbeat import Heartbeat
+
+        heart = Heartbeat(config.heartbeat_url)
+
+    display = EvalDisplay(config.evals, screen=tui_mode, compact=compact)
+
+    async def run_with_progress(
+        env_config: EvalConfig, env_idx: int
+    ) -> GenerateOutputs:
+        """Run a single evaluation with display progress updates."""
+
+        def on_start(raw_inputs: list[RolloutInput], filtered_inputs) -> None:
+            total = len(raw_inputs)
+            if (
+                isinstance(filtered_inputs, list)
+                and filtered_inputs
+                and isinstance(filtered_inputs[0], list)
+            ):
+                remaining = sum(len(g) for g in filtered_inputs)
+            else:
+                remaining = len(filtered_inputs) if filtered_inputs else 0
+            resumed = total - remaining
+            num_examples = total // env_config.rollouts_per_example
+            display.update_env_state(
+                env_idx, total=total, num_examples=num_examples, progress=resumed
+            )
+
+        def on_display_progress(
+            all_outputs: list[RolloutOutput],
+            new_outputs: list[RolloutOutput],
+            metadata: GenerateMetadata,
+        ) -> None:
+            metrics = dict(metadata.get("avg_metrics") or {})
+            pass_at_k = metadata.get("pass_at_k") or {}
+            for k, v in pass_at_k.items():
+                metrics[f"pass@{k}"] = v
+            pass_all_k = metadata.get("pass_all_k") or {}
+            for k, v in pass_all_k.items():
+                metrics[f"pass^{k}"] = v
+            display.update_env_state(
+                env_idx,
+                progress=len(all_outputs),
+                reward=metadata.get("avg_reward"),
+                metrics=metrics,
+                error_rate=metadata.get("avg_error"),
+                usage=metadata.get("usage"),
+            )
+
+        on_progress: list[ProgressCallback] = [on_display_progress]
+        if heart is not None:
+            on_progress.append(lambda *_a, **_kw: asyncio.create_task(heart.beat()))
+
+        def on_log(message: str) -> None:
+            display.update_env_state(env_idx, log_message=message)
+
+        def register_log_file(log_file: Path) -> None:
+            display.add_log_file_for_env(env_idx, log_file)
+
+        display.update_env_state(env_idx, status="running")
+        try:
+            result = await run_evaluation(
+                env_config,
+                on_start=on_start,
+                on_progress=on_progress,
+                on_log=on_log,
+                on_log_file=register_log_file,
+            )
+
+            # get save path if results were saved
+            save_path = (
+                result["metadata"]["path_to_save"] if env_config.save_results else None
+            )
+
+            display.update_env_state(
+                env_idx,
+                status="completed",
+                save_path=save_path,
+                results=result,
+            )
+
+            return result
+        except Exception as e:
+            display.update_env_state(env_idx, status="failed", error=str(e))
+            raise
+
+    # Use a daemon thread for the refresh loop so it runs even when the
+    # event loop is blocked by synchronous work (e.g. env installation).
+    refresh_stop = threading.Event()
+
+    def refresh_loop() -> None:
+        while not refresh_stop.is_set() and not display.state.all_completed:
+            display.refresh()
+            refresh_stop.wait(1)
+
+    try:
+        async with display:
+            refresh_thread = threading.Thread(target=refresh_loop, daemon=True)
+            refresh_thread.start()
+            try:
+                await asyncio.gather(
+                    *[
+                        run_with_progress(env_config, idx)
+                        for idx, env_config in enumerate(config.evals)
+                    ],
+                    return_exceptions=True,
+                )
+
+                display.refresh()
+                if tui_mode:
+                    await display.wait_for_exit()
+            finally:
+                refresh_stop.set()
+                refresh_thread.join(timeout=2)
+
+    except KeyboardInterrupt:
+        pass  # exit on interrupt
+    finally:
+        if heart is not None:
+            await heart.close()
+
+    # print final summary after exit
+    display.print_final_summary()

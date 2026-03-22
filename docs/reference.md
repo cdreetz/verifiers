@@ -8,7 +8,9 @@
   - [Environment Classes](#environment-classes)
   - [Parser Classes](#parser-classes)
   - [Rubric Classes](#rubric-classes)
+- [Client Classes](#client-classes)
 - [Configuration Types](#configuration-types)
+- [Prime CLI Plugin](#prime-cli-plugin)
 - [Decorators](#decorators)
 - [Utility Functions](#utility-functions)
 
@@ -58,13 +60,18 @@ RewardFunc = IndividualRewardFunc | GroupRewardFunc
 
 Individual reward functions operate on single rollouts. Group reward functions operate on all rollouts for an example together (useful for relative scoring).
 
-### ModelResponse
+### ClientType
 
 ```python
-ModelResponse = Completion | ChatCompletion | None
+ClientType = Literal[
+    "openai_completions",
+    "openai_chat_completions",
+    "openai_chat_completions_token",
+    "anthropic_messages",
+]
 ```
 
-Raw response from the OpenAI API.
+Selects which `Client` implementation to use. Set via `ClientConfig.client_type`.
 
 ---
 
@@ -84,12 +91,12 @@ A `dict` subclass that tracks rollout information. Accessing keys in `INPUT_FIEL
 | Field | Type | Description |
 |-------|------|-------------|
 | `input` | `RolloutInput` | Nested input data |
-| `client` | `AsyncOpenAI` | OpenAI client |
+| `client` | `Client` | Client instance |
 | `model` | `str` | Model name |
 | `sampling_args` | `SamplingArgs \| None` | Generation parameters |
 | `is_completed` | `bool` | Whether rollout has ended |
 | `is_truncated` | `bool` | Whether generation was truncated |
-| `oai_tools` | `list[ChatCompletionToolParam]` | Available tools |
+| `tool_defs` | `list[Tool] \| None` | Available tool definitions |
 | `trajectory` | `list[TrajectoryStep]` | Multi-turn trajectory |
 | `trajectory_id` | `str` | UUID for this rollout |
 | `timing` | `RolloutTiming` | Timing information |
@@ -116,13 +123,38 @@ class RolloutInput(TypedDict):
     info: Info              # Optional
 ```
 
+### RolloutOutput
+
+```python
+class RolloutOutput(dict):
+    # Required fields
+    example_id: int
+    task: str
+    prompt: Messages | None
+    completion: Messages | None
+    reward: float
+    timing: RolloutTiming
+    is_completed: bool
+    is_truncated: bool
+    metrics: dict[str, float]
+    # Optional fields
+    answer: str
+    info: Info
+    error: str | None
+    stop_condition: str | None
+    trajectory: list[TrajectoryStep]
+    tool_defs: list[Tool] | None
+```
+
+Serialized output from a rollout. This is a `dict` subclass that provides typed access to known fields while supporting arbitrary additional fields from `state_columns`. All values must be JSON-serializable. Used in `GenerateOutputs` and for saving results to disk.
+
 ### TrajectoryStep
 
 ```python
 class TrajectoryStep(TypedDict):
     prompt: Messages
     completion: Messages
-    response: ModelResponse
+    response: Response
     tokens: TrajectoryStepTokens | None
     reward: float | None
     advantage: float | None
@@ -144,6 +176,7 @@ class TrajectoryStepTokens(TypedDict):
     completion_logprobs: list[float]
     overlong_prompt: bool
     is_truncated: bool
+    routed_experts: list[list[list[int]]] | None  # [seq_len, layers, topk] to enable router replay
 ```
 
 Token-level data for training.
@@ -162,25 +195,21 @@ class RolloutTiming(TypedDict, total=False):
 
 ```python
 class GenerateOutputs(TypedDict):
-    prompt: list[Messages]
-    completion: list[Messages]
-    answer: list[str]
-    state: list[State]
-    task: list[str]
-    info: list[Info]
-    example_id: list[int]
-    reward: list[float]
-    metrics: dict[str, list[float]]
-    stop_conditions: list[str | None]
-    is_truncated: list[bool]
+    outputs: list[RolloutOutput]
     metadata: GenerateMetadata
 ```
 
-Output from `Environment.generate()`.
+Output from `Environment.generate()`. Contains a list of `RolloutOutput` objects (one per rollout) and generation metadata. Each `RolloutOutput` is a serialized, JSON-compatible dict containing the rollout's prompt, completion, answer, reward, metrics, timing, and other per-rollout data.
 
 ### GenerateMetadata
 
 ```python
+class VersionInfo(TypedDict):
+    vf_version: str
+    vf_commit: str | None
+    env_version: str | None
+    env_commit: str | None
+
 class GenerateMetadata(TypedDict):
     env_id: str
     env_args: dict
@@ -193,9 +222,20 @@ class GenerateMetadata(TypedDict):
     time_ms: float
     avg_reward: float
     avg_metrics: dict[str, float]
+    avg_error: float
+    pass_at_k: dict[str, float]
+    pass_all_k: dict[str, float]
+    pass_threshold: float
+    usage: TokenUsage | None
+    version_info: VersionInfo
     state_columns: list[str]
     path_to_save: Path
+    tools: list[Tool] | None
 ```
+
+`base_url` is always serialized as a string. For multi-endpoint runs (e.g., using `ClientConfig.endpoint_configs`), it is stored as a comma-separated list of URLs.
+
+`version_info` captures the verifiers framework version/commit and the environment package version/commit at generation time. Populated automatically by `GenerateOutputsBuilder`.
 
 ### RolloutScore / RolloutScores
 
@@ -208,21 +248,6 @@ class RolloutScores(TypedDict):
     reward: list[float]
     metrics: dict[str, list[float]]
 ```
-
-### ProcessedOutputs
-
-```python
-class ProcessedOutputs(TypedDict):
-    prompt_ids: list[list[int]]
-    prompt_mask: list[list[int]]
-    completion_ids: list[list[int]]
-    completion_mask: list[list[int]]
-    completion_logprobs: list[list[float]]
-    rewards: list[float]
-    is_truncated: list[bool]
-```
-
-Tokenized outputs for training.
 
 ---
 
@@ -244,11 +269,12 @@ class Environment(ABC):
         rubric: Rubric | None = None,
         sampling_args: SamplingArgs | None = None,
         message_type: MessageType = "chat",
-        oai_tools: list[ChatCompletionToolParam] | None = None,
         max_workers: int = 512,
         env_id: str | None = None,
         env_args: dict | None = None,
         max_seq_len: int | None = None,
+        score_rollouts: bool = True,
+        pass_threshold: float = 0.5,
         **kwargs,
     ): ...
 ```
@@ -259,7 +285,7 @@ Abstract base class for all environments.
 
 | Method | Returns | Description |
 |--------|---------|-------------|
-| `generate(inputs, client, model, ...)` | `GenerateOutputs` | Run rollouts asynchronously |
+| `generate(inputs, client, model, ...)` | `GenerateOutputs` | Run rollouts asynchronously. `client` accepts `Client \| ClientConfig`. |
 | `generate_sync(inputs, client, ...)` | `GenerateOutputs` | Synchronous wrapper |
 | `evaluate(client, model, ...)` | `GenerateOutputs` | Evaluate on eval_dataset |
 | `evaluate_sync(client, model, ...)` | `GenerateOutputs` | Synchronous evaluation |
@@ -278,7 +304,7 @@ Abstract base class for all environments.
 |--------|---------|-------------|
 | `rollout(input, client, model, sampling_args)` | `State` | Abstract: run single rollout |
 | `init_state(input, client, model, sampling_args)` | `State` | Create initial state from input |
-| `get_model_response(state, prompt, ...)` | `ModelResponse` | Get model response for prompt |
+| `get_model_response(state, prompt, ...)` | `Response` | Get model response for prompt |
 | `is_completed(state)` | `bool` | Check all stop conditions |
 | `run_rollout(sem, input, client, model, sampling_args)` | `State` | Run rollout with semaphore |
 | `run_group(group_inputs, client, model, ...)` | `list[State]` | Generate and score one group |
@@ -288,9 +314,9 @@ Abstract base class for all environments.
 | Method | Description |
 |--------|-------------|
 | `set_kwargs(**kwargs)` | Set attributes using setter methods when available |
+| `set_concurrency(concurrency)` | Set `concurrency` and scale all registered thread-pool executors to match |
 | `add_rubric(rubric)` | Add or merge rubric |
 | `set_max_seq_len(max_seq_len)` | Set maximum sequence length |
-| `set_interleaved_rollouts(bool)` | Enable/disable interleaved rollouts |
 | `set_score_rollouts(bool)` | Enable/disable scoring |
 
 #### SingleTurnEnv
@@ -356,11 +382,66 @@ Tools requiring per-rollout state. Override `setup_state` and `update_tool_args`
 
 #### SandboxEnv
 
+```python
+class SandboxEnv(StatefulToolEnv):
+    def __init__(
+        self,
+        sandbox_name: str = "sandbox-env",
+        docker_image: str = "python:3.11-slim",
+        start_command: str = "tail -f /dev/null",
+        cpu_cores: int = 1,
+        memory_gb: int = 2,
+        disk_size_gb: int = 5,
+        gpu_count: int = 0,
+        timeout_minutes: int = 60,
+        timeout_per_command_seconds: int = 30,
+        environment_vars: dict[str, str] | None = None,
+        team_id: str | None = None,
+        advanced_configs: AdvancedConfigs | None = None,
+        labels: list[str] | None = None,
+        **kwargs,
+    ): ...
+```
+
 Sandboxed container execution using `prime` sandboxes.
+
+**Key parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `sandbox_name` | `str` | Name prefix for sandbox instances |
+| `docker_image` | `str` | Docker image to use for the sandbox |
+| `cpu_cores` | `int` | Number of CPU cores |
+| `memory_gb` | `int` | Memory allocation in GB |
+| `disk_size_gb` | `int` | Disk size in GB |
+| `gpu_count` | `int` | Number of GPUs |
+| `timeout_minutes` | `int` | Sandbox timeout in minutes |
+| `timeout_per_command_seconds` | `int` | Per-command execution timeout |
+| `environment_vars` | `dict[str, str] \| None` | Environment variables to set in sandbox |
+| `labels` | `list[str] \| None` | Labels for sandbox categorization and filtering |
 
 #### PythonEnv
 
 Persistent Python REPL in sandbox. Extends `SandboxEnv`.
+
+#### OpenEnvEnv
+
+```python
+class OpenEnvEnv(MultiTurnEnv):
+    def __init__(
+        self,
+        openenv_project: str | Path,
+        num_train_examples: int = 100,
+        num_eval_examples: int = 50,
+        seed: int = 0,
+        prompt_renderer: Callable[..., ChatMessages] | None = None,
+        max_turns: int = -1,
+        rubric: Rubric | None = None,
+        **kwargs,
+    ): ...
+```
+
+OpenEnv integration that runs OpenEnv projects in Prime Sandboxes using a prebuilt image manifest (`.build.json`), supports both gym and MCP contracts, and requires a `prompt_renderer` to convert observations into chat messages.
 
 #### EnvGroup
 
@@ -505,12 +586,126 @@ Combines rubrics for `EnvGroup`.
 
 ---
 
+## Client Classes
+
+### Client
+
+```python
+class Client(ABC, Generic[ClientT, MessagesT, ResponseT, ToolT]):
+    def __init__(self, client_or_config: ClientT | ClientConfig) -> None: ...
+
+    @property
+    def client(self) -> ClientT: ...
+
+    async def get_response(
+        self,
+        prompt: Messages,
+        model: str,
+        sampling_args: SamplingArgs,
+        tools: list[Tool] | None = None,
+        **kwargs,
+    ) -> Response: ...
+
+    async def close(self) -> None: ...
+```
+
+Abstract base class for all model clients. Wraps a provider-specific SDK client and translates between provider-agnostic `vf` types (`Messages`, `Tool`, `Response`) and provider-native formats. The `client` property exposes the underlying SDK client (e.g., `AsyncOpenAI`, `AsyncAnthropic`).
+
+`get_response()` is the main public method — it converts the prompt and tools to the native format, calls the provider API, validates the response, and converts it back to a `vf.Response`. Errors are wrapped in `vf.ModelError` unless they are already `vf.Error` or authentication errors.
+
+**Abstract methods (for subclass implementors):**
+
+| Method | Description |
+|--------|-------------|
+| `setup_client(config)` | Create the native SDK client from `ClientConfig` |
+| `to_native_prompt(messages)` | Convert `Messages` → native prompt format + extra kwargs |
+| `to_native_tool(tool)` | Convert `Tool` → native tool format |
+| `get_native_response(prompt, model, ...)` | Call the provider API |
+| `raise_from_native_response(response)` | Raise `ModelError` for invalid responses |
+| `from_native_response(response)` | Convert native response → `vf.Response` |
+| `close()` | Close the underlying SDK client |
+
+### Built-in Client Implementations
+
+| Class | `client_type` | SDK Client | Description |
+|-------|---------------|------------|-------------|
+| `OpenAIChatCompletionsClient` | `"openai_chat_completions"` | `AsyncOpenAI` | Chat Completions API (default) |
+| `OpenAICompletionsClient` | `"openai_completions"` | `AsyncOpenAI` | Legacy Completions API |
+| `OpenAIChatCompletionsTokenClient` | `"openai_chat_completions_token"` | `AsyncOpenAI` | Custom vLLM token route |
+| `AnthropicMessagesClient` | `"anthropic_messages"` | `AsyncAnthropic` | Anthropic Messages API |
+
+All built-in clients are available as `vf.OpenAIChatCompletionsClient`, `vf.AnthropicMessagesClient`, etc.
+
+### Response
+
+```python
+class Response(BaseModel):
+    id: str
+    created: int
+    model: str
+    usage: Usage | None
+    message: ResponseMessage
+
+class ResponseMessage(BaseModel):
+    content: str | None
+    reasoning_content: str | None
+    finish_reason: Literal["stop", "length", "tool_calls"] | None
+    is_truncated: bool | None
+    tokens: ResponseTokens | None
+    tool_calls: list[ToolCall] | None
+```
+
+Provider-agnostic model response. All `Client` implementations return `Response` from `get_response()`.
+
+### Tool
+
+```python
+class Tool(BaseModel):
+    name: str
+    description: str
+    parameters: dict[str, object]
+    strict: bool | None = None
+```
+
+Provider-agnostic tool definition. Environments define tools using this type; each `Client` converts them to its native format via `to_native_tool()`.
+
+---
+
 ## Configuration Types
 
 ### ClientConfig
 
 ```python
 class ClientConfig(BaseModel):
+    client_idx: int = 0
+    client_type: ClientType = "openai_chat_completions"
+    api_key_var: str = "PRIME_API_KEY"
+    api_base_url: str = "https://api.pinference.ai/api/v1"
+    endpoint_configs: list[EndpointClientConfig] = []
+    timeout: float = 3600.0
+    connect_timeout: float = 5.0
+    max_connections: int = 28000
+    max_keepalive_connections: int = 28000
+    max_retries: int = 10
+    extra_headers: dict[str, str] = {}
+    extra_headers_from_state: dict[str, str] = {}
+```
+
+`extra_headers_from_state` maps HTTP header names to state field names. For each inference request, the header value is dynamically read from the rollout state dict. For example, `{"X-Session-ID": "example_id"}` adds a `X-Session-ID` header with the value of `state["example_id"]`, enabling sticky routing at the inference router level.
+
+`client_type` selects which `Client` implementation to instantiate (see [Client Classes](#client-classes)). Use `endpoint_configs` for multi-endpoint round-robin. In grouped scoring mode, groups are distributed round-robin across endpoint configs.
+
+When `api_key_var` is `"PRIME_API_KEY"` (the default), credentials are loaded with the following precedence:
+- **API key**: `PRIME_API_KEY` env var > `~/.prime/config.json` > `"EMPTY"`
+- **Team ID**: `PRIME_TEAM_ID` env var > `~/.prime/config.json` > not set
+
+This allows seamless use after running `prime login`.
+
+### EndpointClientConfig
+
+```python
+class EndpointClientConfig(BaseModel):
+    client_idx: int = 0
     api_key_var: str = "PRIME_API_KEY"
     api_base_url: str = "https://api.pinference.ai/api/v1"
     timeout: float = 3600.0
@@ -520,11 +715,7 @@ class ClientConfig(BaseModel):
     extra_headers: dict[str, str] = {}
 ```
 
-When `api_key_var` is `"PRIME_API_KEY"` (the default), credentials are loaded with the following precedence:
-- **API key**: `PRIME_API_KEY` env var > `~/.prime/config.json` > `"EMPTY"`
-- **Team ID**: `PRIME_TEAM_ID` env var > `~/.prime/config.json` > not set
-
-This allows seamless use after running `prime login`.
+Leaf endpoint configuration used inside `ClientConfig.endpoint_configs`. Has the same fields as `ClientConfig` except `endpoint_configs` itself, preventing recursive nesting.
 
 ### EvalConfig
 
@@ -533,20 +724,20 @@ class EvalConfig(BaseModel):
     env_id: str
     env_args: dict
     env_dir_path: str
+    endpoint_id: str | None = None
     model: str
     client_config: ClientConfig
     sampling_args: SamplingArgs
     num_examples: int
     rollouts_per_example: int
     max_concurrent: int
-    max_concurrent_generation: int | None = None
-    max_concurrent_scoring: int | None = None
+    independent_scoring: bool = False
     extra_env_kwargs: dict = {}
-    print_results: bool = False
+    max_retries: int = 0
     verbose: bool = False
     state_columns: list[str] | None = None
     save_results: bool = False
-    save_every: int = -1
+    resume_path: Path | None = None
     save_to_hf_hub: bool = False
     hf_hub_dataset_name: str | None = None
 ```
@@ -555,8 +746,54 @@ class EvalConfig(BaseModel):
 
 ```python
 Endpoint = TypedDict("Endpoint", {"key": str, "url": str, "model": str})
-Endpoints = dict[str, Endpoint]
+Endpoints = dict[str, list[Endpoint]]
 ```
+
+`Endpoints` maps an endpoint id to one or more endpoint variants. A single variant is represented as a one-item list.
+
+---
+
+## Prime CLI Plugin
+
+Verifiers exposes a plugin contract consumed by `prime` for command execution.
+
+### PRIME_PLUGIN_API_VERSION
+
+```python
+PRIME_PLUGIN_API_VERSION = 1
+```
+
+API version for compatibility checks between `prime` and `verifiers`.
+
+### PrimeCLIPlugin
+
+```python
+@dataclass(frozen=True)
+class PrimeCLIPlugin:
+    api_version: int = PRIME_PLUGIN_API_VERSION
+    eval_module: str = "verifiers.cli.commands.eval"
+    gepa_module: str = "verifiers.cli.commands.gepa"
+    install_module: str = "verifiers.cli.commands.install"
+    init_module: str = "verifiers.cli.commands.init"
+    setup_module: str = "verifiers.cli.commands.setup"
+    build_module: str = "verifiers.cli.commands.build"
+
+    def build_module_command(
+        self, module_name: str, args: Sequence[str] | None = None
+    ) -> list[str]:
+        ...
+```
+
+`build_module_command` returns a subprocess command list for `python -m <module> ...`.
+
+### get_plugin
+
+```python
+def get_plugin() -> PrimeCLIPlugin:
+    ...
+```
+
+Returns the plugin instance consumed by `prime`.
 
 ---
 
@@ -590,7 +827,7 @@ async def early_cleanup(self, state: State) -> None:
     ...
 ```
 
-Mark a method as a rollout cleanup handler.
+Mark a method as a rollout cleanup handler. Cleanup methods should be **idempotent**—safe to call multiple times—and handle errors gracefully to ensure cleanup completes even when resources are in unexpected states.
 
 ### @vf.teardown
 
@@ -620,10 +857,10 @@ vf.load_example_dataset(name: str) -> Dataset
 Load a built-in example dataset.
 
 ```python
-vf.extract_boxed_answer(text: str) -> str | None
+vf.extract_boxed_answer(text: str, strict: bool = False) -> str
 ```
 
-Extract answer from LaTeX `\boxed{}` format.
+Extract answer from LaTeX `\boxed{}` format. When `strict=True`, returns `""` if no `\boxed{}` is found (used by `MathRubric` to avoid scoring unformatted responses). When `strict=False` (default), returns the original text as a passthrough.
 
 ```python
 vf.extract_hash_answer(text: str) -> str | None
@@ -638,6 +875,28 @@ vf.load_environment(env_id: str, **kwargs) -> Environment
 ```
 
 Load an environment by ID (e.g., `"primeintellect/gsm8k"`).
+
+### Configuration Utilities
+
+```python
+vf.ensure_keys(keys: list[str]) -> None
+```
+
+Validate that required environment variables are set. Raises `MissingKeyError` (a `ValueError` subclass) with a clear message listing all missing keys and instructions for setting them.
+
+```python
+class MissingKeyError(ValueError):
+    keys: list[str]  # list of missing key names
+```
+
+Example:
+
+```python
+def load_environment(api_key_var: str = "OPENAI_API_KEY") -> vf.Environment:
+    vf.ensure_keys([api_key_var])
+    # now safe to use os.environ[api_key_var]
+    ...
+```
 
 ### Logging Utilities
 

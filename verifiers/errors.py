@@ -8,8 +8,14 @@ class ModelError(Error):
     pass
 
 
-class EmptyModelResponseError(ModelError):
-    """Used to catch empty or invalid model responses (e.g. response.choices is None)."""
+class InvalidModelResponseError(ModelError):
+    """Used to catch empty or invalid model responses."""
+
+    pass
+
+
+class EmptyModelResponseError(InvalidModelResponseError):
+    """Used to catch empty model responses."""
 
     pass
 
@@ -44,7 +50,19 @@ class InfraError(Error):
     pass
 
 
+class TunnelError(InfraError):
+    """Raised when a tunnel process dies or becomes unreachable."""
+
+    pass
+
+
 class SandboxError(InfraError):
     """Used to catch errors while interacting with sandboxes."""
+
+    pass
+
+
+class BrowserSandboxError(SandboxError):
+    """Used to catch errors while interacting with browser sandboxes."""
 
     pass

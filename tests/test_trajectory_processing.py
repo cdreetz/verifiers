@@ -1,7 +1,7 @@
 """Tests for trajectory-based processing.
 
 Covers:
-- parse_response_tokens for extracting tokens from vLLM responses
+- parse_response_tokens for extracting tokens from vf.Response
 - Trajectory step processing for training data
 - Handling of missing token data
 """
@@ -10,27 +10,42 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from verifiers.types import RolloutInput, State, TrajectoryStep, TrajectoryStepTokens
+from verifiers.types import (
+    Response,
+    ResponseMessage,
+    ResponseTokens,
+    State,
+    TrajectoryStep,
+    TrajectoryStepTokens,
+)
 from verifiers.utils.response_utils import parse_response_tokens
 
 
 @pytest.mark.asyncio
-async def test_parse_response_tokens_chat_with_tokens():
-    """Test parsing tokens from chat completion response with token data."""
-    from verifiers.types import ChatCompletion
+async def test_parse_response_tokens_with_tokens():
+    """Test parsing tokens from vf.Response with token data."""
+    response = Response(
+        id="test-id",
+        created=0,
+        model="test-model",
+        message=ResponseMessage(
+            role="assistant",
+            content="Hello",
+            reasoning_content=None,
+            tool_calls=None,
+            finish_reason="stop",
+            is_truncated=False,
+            tokens=ResponseTokens(
+                prompt_ids=[1, 2, 3],
+                prompt_mask=[0, 0, 0],
+                completion_ids=[4, 5, 6],
+                completion_mask=[1, 1, 1],
+                completion_logprobs=[-0.1, -0.2, -0.3],
+            ),
+        ),
+    )
 
-    mock_response = MagicMock(spec=ChatCompletion)
-    mock_response.prompt_token_ids = [1, 2, 3]
-    mock_response.choices = [MagicMock()]
-    mock_response.choices[0].token_ids = [4, 5, 6]
-    mock_response.choices[0].logprobs = MagicMock()
-    mock_response.choices[0].logprobs.content = [
-        MagicMock(logprob=-0.1),
-        MagicMock(logprob=-0.2),
-        MagicMock(logprob=-0.3),
-    ]
-
-    tokens = await parse_response_tokens(mock_response, "chat")
+    tokens = await parse_response_tokens(response)
 
     assert tokens is not None
     assert tokens["prompt_ids"] == [1, 2, 3]
@@ -41,61 +56,101 @@ async def test_parse_response_tokens_chat_with_tokens():
 
 
 @pytest.mark.asyncio
-async def test_parse_response_tokens_chat_without_tokens():
-    """Test parsing tokens from chat completion response without token data."""
-    from verifiers.types import ChatCompletion
+async def test_parse_response_tokens_without_tokens():
+    """Test parsing tokens from vf.Response without token data."""
+    response = Response(
+        id="test-id",
+        created=0,
+        model="test-model",
+        message=ResponseMessage(
+            role="assistant",
+            content="Hello",
+            reasoning_content=None,
+            tool_calls=None,
+            finish_reason="stop",
+            is_truncated=False,
+            tokens=None,
+        ),
+    )
 
-    mock_response = MagicMock(spec=ChatCompletion)
-    mock_response.choices = [MagicMock()]
-    del mock_response.prompt_token_ids
-
-    tokens = await parse_response_tokens(mock_response, "chat")
+    tokens = await parse_response_tokens(response)
 
     assert tokens is None
 
 
 @pytest.mark.asyncio
-async def test_parse_response_tokens_completion_with_tokens():
-    """Test parsing tokens from completion response with token data."""
-    from verifiers.types import Completion
+async def test_parse_response_tokens_with_max_seq_len_truncates_completion():
+    """Test max_seq_len truncation for completion tokens."""
+    response = Response(
+        id="test-id",
+        created=0,
+        model="test-model",
+        message=ResponseMessage(
+            role="assistant",
+            content="Hello",
+            reasoning_content=None,
+            tool_calls=None,
+            finish_reason="length",
+            is_truncated=True,
+            tokens=ResponseTokens(
+                prompt_ids=[10, 20],
+                prompt_mask=[0, 0],
+                completion_ids=[30, 40, 50],
+                completion_mask=[1, 1, 1],
+                completion_logprobs=[-0.5, -0.6, -0.7],
+            ),
+        ),
+    )
 
-    mock_response = MagicMock(spec=Completion)
-    mock_response.choices = [MagicMock()]
-    mock_response.choices[0].prompt_token_ids = [10, 20]
-    mock_response.choices[0].token_ids = [30, 40, 50]
-    mock_response.choices[0].logprobs = MagicMock()
-    mock_response.choices[0].logprobs.token_logprobs = [-0.5, -0.6, -0.7]
-
-    tokens = await parse_response_tokens(mock_response, "completion")
+    tokens = await parse_response_tokens(response, max_seq_len=4)
 
     assert tokens is not None
     assert tokens["prompt_ids"] == [10, 20]
-    assert tokens["completion_ids"] == [30, 40, 50]
+    assert tokens["completion_ids"] == [30, 40]
     assert tokens["prompt_mask"] == [0, 0]
-    assert tokens["completion_mask"] == [1, 1, 1]
-    assert tokens["completion_logprobs"] == [-0.5, -0.6, -0.7]
+    assert tokens["completion_mask"] == [1, 1]
+    assert tokens["completion_logprobs"] == [-0.5, -0.6]
+    assert tokens["is_truncated"] is True
 
 
 @pytest.mark.asyncio
-async def test_parse_response_tokens_completion_without_tokens():
-    """Test parsing tokens from completion response without token data."""
-    from verifiers.types import Completion
+async def test_parse_response_tokens_with_overlong_prompt():
+    """Test overlong prompt handling with max_seq_len."""
+    response = Response(
+        id="test-id",
+        created=0,
+        model="test-model",
+        message=ResponseMessage(
+            role="assistant",
+            content="Hello",
+            reasoning_content=None,
+            tool_calls=None,
+            finish_reason="length",
+            is_truncated=True,
+            tokens=ResponseTokens(
+                prompt_ids=[1, 2, 3, 4],
+                prompt_mask=[0, 0, 0, 0],
+                completion_ids=[5, 6],
+                completion_mask=[1, 1],
+                completion_logprobs=[-0.1, -0.2],
+            ),
+        ),
+    )
 
-    mock_response = MagicMock(spec=Completion)
-    mock_response.choices = [MagicMock()]
-    del mock_response.choices[0].prompt_token_ids
+    tokens = await parse_response_tokens(response, max_seq_len=3)
 
-    tokens = await parse_response_tokens(mock_response, "completion")
+    assert tokens is not None
+    assert tokens["prompt_ids"] == [1, 2, 3]
+    assert tokens["completion_ids"] == []
+    assert tokens["overlong_prompt"] is True
+    assert tokens["is_truncated"] is True
 
-    assert tokens is None
 
-
-def test_process_trajectory_steps_for_training():
+def test_process_trajectory_steps_for_training(make_input):
     """Test processing trajectory steps into training examples."""
     state1 = State(
-        input=RolloutInput(
+        input=make_input(
             prompt=[{"role": "user", "content": "Hello"}],
-            example_id=0,
             task="test",
         )
     )
@@ -122,7 +177,7 @@ def test_process_trajectory_steps_for_training():
     ]
 
     state2 = State(
-        input=RolloutInput(
+        input=make_input(
             prompt=[{"role": "user", "content": "Bye"}],
             example_id=1,
             task="test",
@@ -183,12 +238,11 @@ def test_process_trajectory_steps_for_training():
     assert rewards_list == [1.0, 0.5]
 
 
-def test_process_trajectory_steps_skip_missing_tokens():
+def test_process_trajectory_steps_skip_missing_tokens(make_input):
     """Test that trajectory steps without tokens are skipped."""
     state = State(
-        input=RolloutInput(
+        input=make_input(
             prompt=[{"role": "user", "content": "Hello"}],
-            example_id=0,
             task="test",
         )
     )
