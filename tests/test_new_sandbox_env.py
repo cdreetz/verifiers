@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from datasets import Dataset
 
 from verifiers.envs.experimental.new_sandbox_env import NewSandboxEnv
-from verifiers.envs.experimental.managers.resource_manager import ResourceState
+from verifiers.envs.experimental.resource_managers.base import ResourceState
 
 
 @pytest.fixture

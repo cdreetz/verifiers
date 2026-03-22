@@ -3,11 +3,16 @@
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from verifiers.envs.experimental.managers.sandbox_manager import (
+from verifiers.envs.experimental.resource_managers.sandbox_manager import (
     ManagedSandbox,
     SandboxManager,
 )
-from verifiers.envs.experimental.managers.resource_manager import ResourceState
+from verifiers.envs.experimental.resource_managers.base import ResourceState
+from verifiers.envs.experimental.resource_managers.retry import RetryConfig
+from verifiers.envs.experimental.resource_managers.errors import (
+    SandboxCreationError,
+    SandboxNotReadyError,
+)
 
 
 class TestManagedSandbox:
@@ -19,28 +24,27 @@ class TestManagedSandbox:
 
         assert sandbox.id == "sandbox-1"
         assert sandbox.state == ResourceState.CREATING
-        assert sandbox.command_execution_times == []
-        assert sandbox.sandbox_ready_wait_time == 0.0
-        assert sandbox.working_dir is None
+        assert sandbox.command_times == []
+        assert sandbox.ready_wait_time == 0.0
 
-    def test_avg_command_execution_time_empty(self):
+    def test_avg_command_time_empty(self):
         """Test average execution time with no commands."""
         sandbox = ManagedSandbox(id="sandbox-1")
-        assert sandbox.avg_command_execution_time == 0.0
+        assert sandbox.avg_command_time == 0.0
 
-    def test_avg_command_execution_time(self):
+    def test_avg_command_time(self):
         """Test average execution time calculation."""
         sandbox = ManagedSandbox(id="sandbox-1")
-        sandbox.command_execution_times = [1.0, 2.0, 3.0]
+        sandbox.command_times = [1.0, 2.0, 3.0]
 
-        assert sandbox.avg_command_execution_time == 2.0
+        assert sandbox.avg_command_time == 2.0
 
 
 @pytest.fixture
 def mock_sandbox_client():
     """Create a mock sandbox client."""
     with patch(
-        "verifiers.envs.experimental.managers.sandbox_manager.ThreadedAsyncSandboxClient"
+        "verifiers.envs.experimental.resource_managers.sandbox_manager.ThreadedAsyncSandboxClient"
     ) as mock_class:
         mock_client = MagicMock()
 
@@ -79,7 +83,7 @@ def mock_sandbox_client():
 def mock_create_sandbox_request():
     """Create a mock CreateSandboxRequest."""
     with patch(
-        "verifiers.envs.experimental.managers.sandbox_manager.CreateSandboxRequest"
+        "verifiers.envs.experimental.resource_managers.sandbox_manager.CreateSandboxRequest"
     ) as mock_class:
         mock_request = MagicMock()
         mock_class.return_value = mock_request
@@ -95,7 +99,7 @@ class TestSandboxManager:
         manager = SandboxManager(
             default_request=mock_create_sandbox_request,
             timeout_per_command=30,
-            max_retries=2,
+            retry_config=RetryConfig(max_attempts=2, initial_delay=0.01),
             health_check_interval=10.0,
             enable_health_monitoring=False,
         )
@@ -148,7 +152,7 @@ class TestSandboxManager:
         await manager.wait_for_ready(sandbox.id)
 
         mock_sandbox_client.wait_for_creation.assert_called_with(sandbox.id)
-        assert sandbox.sandbox_ready_wait_time >= 0
+        assert sandbox.ready_wait_time >= 0
 
     @pytest.mark.asyncio
     async def test_wait_for_ready_failure(
@@ -183,7 +187,7 @@ class TestSandboxManager:
 
         mock_sandbox_client.execute_command.assert_called()
         assert output == "command output"
-        assert len(sandbox.command_execution_times) == 1
+        assert len(sandbox.command_times) == 1
 
     @pytest.mark.asyncio
     async def test_execute_command_with_stderr(
@@ -223,7 +227,7 @@ class TestSandboxManager:
         output = await manager.execute_command(sandbox.id, "sleep 100")
 
         assert "timed out" in output.lower()
-        assert len(sandbox.command_execution_times) == 1
+        assert len(sandbox.command_times) == 1
 
     @pytest.mark.asyncio
     async def test_execute_command_unknown_sandbox(
@@ -285,7 +289,7 @@ class TestSandboxManager:
     ):
         """Test that release_all uses sync client for shutdown safety."""
         with patch(
-            "verifiers.envs.experimental.managers.sandbox_manager.SandboxClient"
+            "verifiers.envs.experimental.resource_managers.sandbox_manager.SandboxClient"
         ) as mock_sync_class:
             mock_sync_client = MagicMock()
             mock_sync_class.return_value = mock_sync_client
@@ -312,7 +316,7 @@ class TestSandboxManagerErrors:
         """Create a SandboxManager for testing."""
         return SandboxManager(
             default_request=mock_create_sandbox_request,
-            max_retries=1,
+            retry_config=RetryConfig(max_attempts=1, initial_delay=0.01),
             enable_health_monitoring=False,
         )
 

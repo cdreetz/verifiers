@@ -13,16 +13,17 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from verifiers.envs.experimental.managers.resource_manager import (
+from verifiers.envs.experimental.resource_managers.base import (
     ManagedResource,
     ResourceError,
     ResourceManager,
     ResourceState,
 )
-from verifiers.envs.experimental.managers.sandbox_manager import (
+from verifiers.envs.experimental.resource_managers.sandbox_manager import (
     ManagedSandbox,
     SandboxManager,
 )
+from verifiers.envs.experimental.resource_managers.retry import RetryConfig
 
 
 class TestResourceManagerErrorTracking:
@@ -32,23 +33,28 @@ class TestResourceManagerErrorTracking:
     def manager(self):
         """Create a concrete ResourceManager subclass for testing."""
 
-        class TestManager(ResourceManager):
+        class TestManager(ResourceManager[ManagedResource]):
             def __init__(self):
                 super().__init__(enable_health_monitoring=False)
                 self.create_should_fail = False
                 self.destroy_should_fail = False
                 self.health_check_result = True
+                self._counter = 0
 
-            async def _create_resource(self, resource, **kwargs):
+            def create_resource_object(self, rollout_id):
+                self._counter += 1
+                return ManagedResource(id=f"resource-{self._counter}", rollout_id=rollout_id)
+
+            async def create_resource(self, resource):
                 if self.create_should_fail:
                     raise Exception("Simulated creation failure")
                 # Normally would create actual resource
 
-            async def _destroy_resource(self, resource_id):
+            async def destroy_resource(self, resource_id):
                 if self.destroy_should_fail:
                     raise Exception("Simulated destroy failure")
 
-            async def _check_health(self, resource_id):
+            async def _check_health_impl(self, resource_id):
                 return self.health_check_result
 
         return TestManager()
@@ -131,7 +137,7 @@ class TestSandboxManagerErrorTracking:
     def sandbox_manager(self):
         """Create SandboxManager with mocked client."""
         with patch(
-            "verifiers.managers.sandbox_manager.ThreadedAsyncSandboxClient"
+            "verifiers.envs.experimental.resource_managers.sandbox_manager.ThreadedAsyncSandboxClient"
         ) as MockClient:
             mock_client = MagicMock()
             MockClient.return_value = mock_client
@@ -144,7 +150,7 @@ class TestSandboxManagerErrorTracking:
                 default_request=mock_request,
                 timeout_per_command=30,
                 enable_health_monitoring=False,
-                max_retries=1,  # Reduce retries for faster tests
+                retry_config=RetryConfig(max_attempts=1, initial_delay=0.01),
             )
 
             return manager, mock_client
@@ -221,13 +227,21 @@ class TestFailureScenarios:
     def test_manager(self):
         """Create a ResourceManager that can simulate various failures."""
 
-        class ScenarioManager(ResourceManager):
+        class ScenarioManager(ResourceManager[ManagedResource]):
             def __init__(self):
-                super().__init__(enable_health_monitoring=False, max_retries=1)
+                super().__init__(
+                    enable_health_monitoring=False,
+                    retry_config=RetryConfig(max_attempts=1, initial_delay=0.01),
+                )
                 self.failure_scenario = None
                 self.created_count = 0
+                self._counter = 0
 
-            async def _create_resource(self, resource, **kwargs):
+            def create_resource_object(self, rollout_id):
+                self._counter += 1
+                return ManagedResource(id=f"resource-{self._counter}", rollout_id=rollout_id)
+
+            async def create_resource(self, resource):
                 self.created_count += 1
                 scenario = self.failure_scenario
 
@@ -237,10 +251,10 @@ class TestFailureScenarios:
                 elif scenario == "fail_all":
                     raise Exception("All creations fail")
 
-            async def _destroy_resource(self, resource_id):
+            async def destroy_resource(self, resource_id):
                 pass
 
-            async def _check_health(self, resource_id):
+            async def _check_health_impl(self, resource_id):
                 return True
 
         return ScenarioManager()

@@ -27,8 +27,8 @@ from prime_sandboxes import (
 from prime_tunnel import Tunnel
 
 import verifiers as vf
-from verifiers.envs.experimental.managers.sandbox_manager import ManagedSandbox, SandboxManager
-from verifiers.envs.experimental.managers.resource_manager import ResourceState
+from verifiers.envs.experimental.resource_managers.sandbox_manager import ManagedSandbox, SandboxManager
+from verifiers.envs.experimental.resource_managers.base import ResourceState
 from verifiers.types import (
     ChatCompletionToolParam,
     Messages,

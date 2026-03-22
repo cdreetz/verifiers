@@ -3,15 +3,16 @@
 import asyncio
 import pytest
 
-from verifiers.envs.experimental.managers.resource_manager import (
+from verifiers.envs.experimental.resource_managers.base import (
     ManagedResource,
     ResourceError,
     ResourceManager,
     ResourceState,
 )
+from verifiers.envs.experimental.resource_managers.retry import RetryConfig
 
 
-class MockResourceManager(ResourceManager):
+class MockResourceManager(ResourceManager[ManagedResource]):
     """Mock implementation of ResourceManager for testing."""
 
     def __init__(self, **kwargs):
@@ -22,18 +23,23 @@ class MockResourceManager(ResourceManager):
         self.should_fail_create = False
         self.should_fail_destroy = False
         self.should_fail_health_check = False
+        self._resource_counter = 0
 
-    async def _create_resource(self, resource: ManagedResource, **kwargs) -> None:
+    def create_resource_object(self, rollout_id: str | None) -> ManagedResource:
+        self._resource_counter += 1
+        return ManagedResource(id=f"resource-{self._resource_counter}", rollout_id=rollout_id)
+
+    async def create_resource(self, resource: ManagedResource) -> None:
         if self.should_fail_create:
             raise RuntimeError("Mock creation failure")
         self.created_resources.append(resource.id)
 
-    async def _destroy_resource(self, resource_id: str) -> None:
+    async def destroy_resource(self, resource_id: str) -> None:
         if self.should_fail_destroy:
             raise RuntimeError("Mock destruction failure")
         self.destroyed_resources.append(resource_id)
 
-    async def _check_health(self, resource_id: str) -> bool:
+    async def _check_health_impl(self, resource_id: str) -> bool:
         if self.should_fail_health_check:
             raise RuntimeError("Mock health check failure")
         return self.health_check_results.get(resource_id, True)
@@ -127,8 +133,7 @@ class TestResourceManager:
         return MockResourceManager(
             health_check_interval=0.1,
             enable_health_monitoring=False,
-            max_retries=2,
-            retry_delay=0.01,
+            retry_config=RetryConfig(max_attempts=2, initial_delay=0.01),
         )
 
     @pytest.mark.asyncio
@@ -149,7 +154,7 @@ class TestResourceManager:
             await manager.acquire(rollout_id="rollout-1")
 
         # Resource should be tracked with ERROR state
-        resources = list(manager._resources.values())
+        resources = list(manager.resources.values())
         assert len(resources) == 1
         assert resources[0].state == ResourceState.ERROR
 
@@ -306,18 +311,17 @@ class TestHealthMonitoring:
         return MockResourceManager(
             health_check_interval=0.05,
             enable_health_monitoring=True,
-            max_retries=1,
-            retry_delay=0.01,
+            retry_config=RetryConfig(max_attempts=1, initial_delay=0.01),
         )
 
     @pytest.mark.asyncio
     async def test_health_monitoring_starts_on_acquire(self, manager: MockResourceManager):
         """Test that health monitoring starts when first resource is acquired."""
-        assert manager._health_monitor_task is None
+        assert manager.health_monitor_task is None
 
         await manager.acquire(rollout_id="rollout-1")
 
-        assert manager._health_monitor_task is not None
+        assert manager.health_monitor_task is not None
 
         await manager.stop_health_monitoring()
 
@@ -338,11 +342,11 @@ class TestHealthMonitoring:
     async def test_health_monitoring_stops_on_release_all(self, manager: MockResourceManager):
         """Test that health monitoring stops when all resources are released."""
         await manager.acquire(rollout_id="rollout-1")
-        assert manager._health_monitor_task is not None
+        assert manager.health_monitor_task is not None
 
         await manager.release_all()
 
-        assert manager._health_monitor_task is None
+        assert manager.health_monitor_task is None
 
 
 class TestResourceError:
