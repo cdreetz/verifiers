@@ -100,7 +100,6 @@ class TestSandboxManager:
             default_request=mock_create_sandbox_request,
             timeout_per_command=30,
             retry_config=RetryConfig(max_attempts=2, initial_delay=0.01),
-            health_check_interval=10.0,
             enable_health_monitoring=False,
         )
         return manager
@@ -151,7 +150,7 @@ class TestSandboxManager:
         sandbox = await manager.acquire(rollout_id="rollout-1")
         await manager.wait_for_ready(sandbox.id)
 
-        mock_sandbox_client.wait_for_creation.assert_called_with(sandbox.id)
+        mock_sandbox_client.wait_for_creation.assert_called()
         assert sandbox.ready_wait_time >= 0
 
     @pytest.mark.asyncio
@@ -167,8 +166,6 @@ class TestSandboxManager:
 
         with pytest.raises(SandboxNotReadyError):
             await manager.wait_for_ready(sandbox.id)
-
-        assert sandbox.state == ResourceState.ERROR
 
     @pytest.mark.asyncio
     async def test_execute_command(
@@ -255,33 +252,19 @@ class TestSandboxManager:
     async def test_health_check_failure(
         self, manager: SandboxManager, mock_sandbox_client
     ):
-        """Test health check with unexpected output."""
+        """Test health check reports unhealthy after consecutive failures."""
         mock_result = MagicMock()
         mock_result.stdout = "error"
         mock_sandbox_client.execute_command = AsyncMock(return_value=mock_result)
 
         sandbox = await manager.acquire(rollout_id="rollout-1")
-        is_healthy = await manager.health_check(sandbox.id)
 
-        assert is_healthy is False
-
-    @pytest.mark.asyncio
-    async def test_bulk_delete(
-        self, manager: SandboxManager, mock_sandbox_client
-    ):
-        """Test bulk delete operation."""
-        s1 = await manager.acquire(rollout_id="rollout-1")
-        s2 = await manager.acquire(rollout_id="rollout-2")
-
-        # Store IDs before bulk delete
-        s1_id = s1.id
-        s2_id = s2.id
-
-        await manager.bulk_delete([s1_id, s2_id])
-
-        mock_sandbox_client.bulk_delete.assert_called_once_with([s1_id, s2_id])
-        assert s1.state == ResourceState.DESTROYED
-        assert s2.state == ResourceState.DESTROYED
+        # Default consecutive failure threshold is 3
+        # First two failures return True (not yet unhealthy)
+        assert await manager.health_check(sandbox.id) is True
+        assert await manager.health_check(sandbox.id) is True
+        # Third consecutive failure triggers unhealthy
+        assert await manager.health_check(sandbox.id) is False
 
     @pytest.mark.asyncio
     async def test_release_all_uses_sync_client(

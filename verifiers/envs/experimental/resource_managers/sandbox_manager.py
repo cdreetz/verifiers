@@ -688,6 +688,7 @@ class SandboxManager(ResourceManager[ManagedSandbox]):
             )
         except Exception as e:
             sandbox.record_failure(not_ready=True, error_message=str(e))
+            self.record_error(sandbox_id, sandbox.rollout_id, e, "ready")
             raise SandboxNotReadyError(
                 f"Sandbox {sandbox_id} failed to become ready: {e}",
                 sandbox_id=sandbox_id,
@@ -702,6 +703,7 @@ class SandboxManager(ResourceManager[ManagedSandbox]):
                 await setup_callback(sandbox_id)
             except Exception as e:
                 sandbox.record_failure(setup_failed=True, error_message=str(e))
+                self.record_error(sandbox_id, sandbox.rollout_id, e, "setup")
                 raise SandboxSetupError(
                     f"Sandbox {sandbox_id} setup failed: {e}",
                     sandbox_id=sandbox_id,
@@ -734,9 +736,11 @@ class SandboxManager(ResourceManager[ManagedSandbox]):
             OOM and sandbox timeout are recorded in failure_info and raised.
         """
         sandbox = self.get_resource(sandbox_id)
+        if sandbox is None:
+            raise ValueError(f"Unknown sandbox: {sandbox_id}")
         timeout = timeout or self.timeout_per_command
         start = time.time()
-        rollout_id = sandbox.rollout_id if sandbox else None
+        rollout_id = sandbox.rollout_id
 
         try:
             result = await self.client.execute_command(
@@ -800,6 +804,19 @@ class SandboxManager(ResourceManager[ManagedSandbox]):
                 command=command,
                 cause=e,
             ) from e
+        except Exception as e:
+            duration = time.time() - start
+            self.record_error(sandbox_id, rollout_id, e, "execute")
+            self.recorder.record(CommandEvent.error(
+                command=command,
+                error_message=str(e),
+                duration_seconds=duration,
+                resource_id=sandbox_id,
+                rollout_id=rollout_id,
+                turn_number=turn_number,
+                working_dir=working_dir,
+            ))
+            raise
 
         duration = time.time() - start
         if sandbox:

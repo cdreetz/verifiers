@@ -23,6 +23,10 @@ from verifiers.envs.experimental.resource_managers.sandbox_manager import (
     ManagedSandbox,
     SandboxManager,
 )
+from verifiers.envs.experimental.resource_managers.errors import (
+    SandboxCreationError,
+    SandboxNotReadyError,
+)
 from verifiers.envs.experimental.resource_managers.retry import RetryConfig
 
 
