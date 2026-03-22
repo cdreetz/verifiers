@@ -204,12 +204,46 @@ class ThreadedAsyncSandboxClient:
                 client = get_or_create_thread_attr("sandbox_client", AsyncSandboxClient, **self.client_kwargs)
                 method = getattr(client, name)
                 return loop.run_until_complete(method(*args, **kwargs))
-            return await asyncio.get_event_loop().run_in_executor(self.executor, run)
+            return await asyncio.get_running_loop().run_in_executor(self.executor, run)
         return wrapper
 
     def teardown(self) -> None:
         self._shutdown = True
+        # Close per-thread event loops and async clients before shutting down the pool
+        self._cleanup_thread_resources()
         self.executor.shutdown(wait=True)
+
+    def _cleanup_thread_resources(self) -> None:
+        """Close per-thread event loops and async clients to prevent resource leaks."""
+        futures = []
+        for _ in range(self.executor._max_workers):
+            future = self.executor.submit(self._close_thread_loop_and_client)
+            futures.append(future)
+        for future in futures:
+            try:
+                future.result(timeout=5)
+            except Exception:
+                pass
+
+    @staticmethod
+    def _close_thread_loop_and_client() -> None:
+        """Close the event loop and async client on the current thread, if they exist."""
+        thread_local = get_thread_local_storage()
+        client = getattr(thread_local, "sandbox_client", None)
+        loop = getattr(thread_local, "loop", None)
+        if client is not None and loop is not None:
+            try:
+                loop.run_until_complete(client.close())
+            except Exception:
+                pass
+        if loop is not None:
+            try:
+                loop.close()
+            except Exception:
+                pass
+            thread_local.loop = None
+        if client is not None:
+            thread_local.sandbox_client = None
 
 
 @dataclass(slots=True)
@@ -1013,6 +1047,7 @@ class SandboxManager(ResourceManager[ManagedSandbox]):
         """Release all sandboxes using bulk delete.
 
         Uses itertools.batched for clean batching and bulk delete for efficiency.
+        Runs the synchronous bulk_delete in a thread to avoid blocking the event loop.
         """
         if self.health_monitor_task:
             self.health_monitor_task.cancel()
@@ -1027,12 +1062,15 @@ class SandboxManager(ResourceManager[ManagedSandbox]):
         batch_size = self.limits["bulk_delete_batch_size"]
         self.logger.info(f"Releasing {len(active_ids)} sandboxes in batches of {batch_size}")
 
+        loop = asyncio.get_running_loop()
         try:
-            sync_client = SandboxClient(APIClient())
             for batch in batched(active_ids, batch_size):
                 batch_list = list(batch)  # batched yields tuples
                 try:
-                    sync_client.bulk_delete(sandbox_ids=batch_list)
+                    # Run synchronous bulk_delete in a thread to avoid blocking the event loop
+                    await loop.run_in_executor(
+                        None, self._bulk_delete_sync, batch_list
+                    )
                 except Exception as e:
                     self.logger.warning(f"Bulk delete failed for batch: {e}")
                 finally:
@@ -1043,6 +1081,12 @@ class SandboxManager(ResourceManager[ManagedSandbox]):
                             self._health_failures.pop(sid, None)
         except Exception as e:
             self.logger.error(f"Failed to release sandboxes: {e}")
+
+    @staticmethod
+    def _bulk_delete_sync(sandbox_ids: list[str]) -> None:
+        """Synchronous bulk delete helper, intended to be run in a thread."""
+        sync_client = SandboxClient(APIClient())
+        sync_client.bulk_delete(sandbox_ids=sandbox_ids)
 
     def teardown(self) -> None:
         """Shutdown the client thread pool."""
