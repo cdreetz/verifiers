@@ -8,8 +8,6 @@ import logging
 from typing import Any
 
 from datasets import load_dataset, Dataset
-from prime_sandboxes import AsyncSandboxClient
-
 import verifiers as vf
 from verifiers.envs.experimental.new_cli_agent_env import NewCliAgentEnv
 from verifiers.types import State
@@ -190,9 +188,7 @@ class NewOpenCodeMathEnv(NewCliAgentEnv):
         env_vars["OPENCODE_INSTRUCTION"] = instruction
         return env_vars
 
-    async def post_sandbox_setup(
-        self, state: State, sandbox_client: AsyncSandboxClient
-    ) -> None:
+    async def post_sandbox_setup(self, state: State) -> None:
         """Write the prompt file to the sandbox before running the agent."""
         sandbox_id = state["sandbox_id"]
 
@@ -204,13 +200,13 @@ class NewOpenCodeMathEnv(NewCliAgentEnv):
             prompt_content = str(prompt)
 
         # Create working directories
-        await sandbox_client.execute_command(
+        await self.sandbox_manager.execute_command(
             sandbox_id, f"mkdir -p /task {self.agent_workdir}"
         )
 
         # Write prompt to file using heredoc (single-quoted delimiter prevents expansion)
         write_cmd = f"cat > /task/prompt.txt << 'PROMPT_EOF'\n{prompt_content}\nPROMPT_EOF"
-        await sandbox_client.execute_command(sandbox_id, write_cmd)
+        await self.sandbox_manager.execute_command(sandbox_id, write_cmd)
 
         logger.debug(f"Wrote prompt to /task/prompt.txt ({len(prompt_content)} chars)")
 

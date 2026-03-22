@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Any
 
 from datasets import Dataset
-from prime_sandboxes import AsyncSandboxClient
 
 import verifiers as vf
 from verifiers.envs.experimental.new_cli_agent_env import NewCliAgentEnv
@@ -113,9 +112,7 @@ class NewHarborEnv(NewCliAgentEnv):
             env_vars.setdefault("AGENT_WORKDIR", self.agent_workdir)
         return env_vars
 
-    async def post_sandbox_setup(
-        self, state: vf.State, sandbox_client: AsyncSandboxClient
-    ) -> None:
+    async def post_sandbox_setup(self, state: vf.State) -> None:
         """Upload Harbor task assets after sandbox creation."""
         task_info: dict[str, Any] = state.get("info", {}) or {}
         task_dir_str = task_info.get("task_dir", "")
@@ -127,13 +124,11 @@ class NewHarborEnv(NewCliAgentEnv):
         if not task_dir.exists():
             raise FileNotFoundError(f"Task directory not found: {task_dir}")
 
-        await self.prepare_harbor_task(sandbox_client, state["sandbox_id"], task_dir)
+        await self.prepare_harbor_task(state["sandbox_id"], task_dir)
         state["harbor_config"] = config
         state["harbor_task_dir"] = str(task_dir)
 
-    async def prepare_harbor_task(
-        self, sandbox_client: AsyncSandboxClient, sandbox_id: str, task_dir: Path
-    ) -> None:
+    async def prepare_harbor_task(self, sandbox_id: str, task_dir: Path) -> None:
         """Upload task instruction only (oracle/tests uploaded after agent completes)."""
         instruction_path = task_dir / "instruction.md"
         task_toml_path = task_dir / "task.toml"
@@ -150,8 +145,8 @@ class NewHarborEnv(NewCliAgentEnv):
                     tar.add(task_toml_path, arcname="task/task.toml")
 
             remote_tar = "/tmp/harbor_task.tar.gz"
-            await sandbox_client.upload_file(sandbox_id, remote_tar, str(tar_path))
-            await sandbox_client.execute_command(
+            await self.sandbox_manager.client.upload_file(sandbox_id, remote_tar, str(tar_path))
+            await self.sandbox_manager.execute_command(
                 sandbox_id,
                 f"mkdir -p /task /logs/verifier {self.agent_workdir} && "
                 f"tar -xzf {remote_tar} -C / && rm {remote_tar}",
@@ -161,9 +156,7 @@ class NewHarborEnv(NewCliAgentEnv):
         finally:
             tar_path.unlink(missing_ok=True)
 
-    async def upload_test_assets(
-        self, sandbox_client: AsyncSandboxClient, sandbox_id: str, task_dir: Path
-    ) -> None:
+    async def upload_test_assets(self, sandbox_id: str, task_dir: Path) -> None:
         """Upload oracle/tests after agent completes, right before running tests."""
         solution_dir = task_dir / "solution"
         tests_dir = task_dir / "tests"
@@ -182,8 +175,8 @@ class NewHarborEnv(NewCliAgentEnv):
                         tar.add(item, arcname=f"tests/{item.name}")
 
             remote_tar = "/tmp/harbor_tests.tar.gz"
-            await sandbox_client.upload_file(sandbox_id, remote_tar, str(tar_path))
-            await sandbox_client.execute_command(
+            await self.sandbox_manager.client.upload_file(sandbox_id, remote_tar, str(tar_path))
+            await self.sandbox_manager.execute_command(
                 sandbox_id,
                 f"mkdir -p /oracle /tests && tar -xzf {remote_tar} -C / && rm {remote_tar}",
                 working_dir=None,
@@ -217,33 +210,24 @@ class NewHarborEnv(NewCliAgentEnv):
             logger.error(f"Task directory not found: {task_dir}")
             return 0.0
 
-        sandbox_client = AsyncSandboxClient(
-            max_connections=100,
-            max_keepalive_connections=50,
-        )
         try:
             # Upload test assets now that agent has completed
-            await self.upload_test_assets(sandbox_client, sandbox_id, task_dir)
+            await self.upload_test_assets(sandbox_id, task_dir)
 
             logger.info(f"Running Harbor tests for task {state.get('task')}")
-            await sandbox_client.execute_command(
+            await self.sandbox_manager.execute_command(
                 sandbox_id, "bash test.sh", working_dir="/tests"
             )
 
-            reward_result = await sandbox_client.execute_command(
+            reward_output = await self.sandbox_manager.execute_command(
                 sandbox_id,
                 "if [ -s /logs/verifier/reward.txt ]; then cat /logs/verifier/reward.txt; "
                 "elif [ -s /logs/verifier/reward.json ]; then cat /logs/verifier/reward.json; fi",
                 working_dir=None,
             )
-            stdout_val = getattr(reward_result, "stdout", "")
-            if stdout_val is None:
-                reward_val = ""
-            elif isinstance(stdout_val, str):
-                reward_val = stdout_val.strip()
-            else:
-                reward_val = str(stdout_val).strip()
-            if reward_val:
+            # execute_command returns a str directly (stdout content)
+            reward_val = reward_output.strip() if reward_output else ""
+            if reward_val and reward_val != "(no output)":
                 try:
                     value = float(reward_val)
                     logger.info(f"Reward from reward.txt: {value}")
