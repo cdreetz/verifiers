@@ -16,7 +16,6 @@ import time
 import uuid
 import weakref
 from collections import Counter
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import AsyncExitStack, asynccontextmanager, contextmanager, suppress
 from dataclasses import dataclass, field
 from itertools import batched
@@ -61,7 +60,6 @@ from verifiers.envs.experimental.resource_managers.recorder import (
     Recorder,
     StateChangeEvent,
 )
-from verifiers.utils.thread_utils import get_or_create_thread_attr, get_or_create_thread_loop
 
 
 logger = logging.getLogger(__name__)
@@ -177,74 +175,6 @@ class FileLock:
         self.release()
 
 
-class ThreadedAsyncSandboxClient:
-    """Wraps AsyncSandboxClient to run in thread pool for better concurrency.
-
-    Dynamically proxies all methods from AsyncSandboxClient, running them
-    in a thread pool to avoid blocking the main event loop.
-    """
-
-    def __init__(
-        self,
-        max_workers: int = 100,
-        max_connections: int = 100,
-        max_keepalive_connections: int = 50,
-    ):
-        self.executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="sandbox-")
-        self.client_kwargs = {
-            "max_connections": max_connections,
-            "max_keepalive_connections": max_keepalive_connections,
-        }
-        self._shutdown = False
-
-    def __getattr__(self, name: str) -> Any:
-        async def wrapper(*args: Any, **kwargs: Any) -> Any:
-            def run() -> Any:
-                loop = get_or_create_thread_loop()
-                client = get_or_create_thread_attr("sandbox_client", AsyncSandboxClient, **self.client_kwargs)
-                method = getattr(client, name)
-                return loop.run_until_complete(method(*args, **kwargs))
-            return await asyncio.get_running_loop().run_in_executor(self.executor, run)
-        return wrapper
-
-    def teardown(self) -> None:
-        self._shutdown = True
-        # Close per-thread event loops and async clients before shutting down the pool
-        self._cleanup_thread_resources()
-        self.executor.shutdown(wait=True)
-
-    def _cleanup_thread_resources(self) -> None:
-        """Close per-thread event loops and async clients to prevent resource leaks."""
-        futures = []
-        for _ in range(self.executor._max_workers):
-            future = self.executor.submit(self._close_thread_loop_and_client)
-            futures.append(future)
-        for future in futures:
-            try:
-                future.result(timeout=5)
-            except Exception:
-                pass
-
-    @staticmethod
-    def _close_thread_loop_and_client() -> None:
-        """Close the event loop and async client on the current thread, if they exist."""
-        thread_local = get_thread_local_storage()
-        client = getattr(thread_local, "sandbox_client", None)
-        loop = getattr(thread_local, "loop", None)
-        if client is not None and loop is not None:
-            try:
-                loop.run_until_complete(client.close())
-            except Exception:
-                pass
-        if loop is not None:
-            try:
-                loop.close()
-            except Exception:
-                pass
-            thread_local.loop = None
-        if client is not None:
-            thread_local.sandbox_client = None
-
 
 @dataclass(slots=True)
 class BackgroundJob:
@@ -352,7 +282,6 @@ class SandboxManager(ResourceManager[ManagedSandbox]):
         # Legacy parameters (still supported, override limits)
         timeout_per_command: int | None = None,
         wait_for_creation_max_attempts: int | None = None,
-        sandbox_client_max_workers: int | None = None,
         sandbox_client_max_connections: int | None = None,
         sandbox_client_max_keepalive_connections: int | None = None,
         **kwargs: Any,
@@ -370,7 +299,6 @@ class SandboxManager(ResourceManager[ManagedSandbox]):
             Legacy parameters (override limits if provided):
             timeout_per_command: Override limits["command_timeout_seconds"]
             wait_for_creation_max_attempts: Override limits["ready_max_attempts"]
-            sandbox_client_max_workers: Override limits["client_max_workers"]
             sandbox_client_max_connections: Override limits["client_max_connections"]
             sandbox_client_max_keepalive_connections: Override limits["client_max_keepalive_connections"]
         """
@@ -382,8 +310,6 @@ class SandboxManager(ResourceManager[ManagedSandbox]):
             self.limits["command_timeout_seconds"] = timeout_per_command
         if wait_for_creation_max_attempts is not None:
             self.limits["ready_max_attempts"] = wait_for_creation_max_attempts
-        if sandbox_client_max_workers is not None:
-            self.limits["client_max_workers"] = sandbox_client_max_workers
         if sandbox_client_max_connections is not None:
             self.limits["client_max_connections"] = sandbox_client_max_connections
         if sandbox_client_max_keepalive_connections is not None:
@@ -413,8 +339,7 @@ class SandboxManager(ResourceManager[ManagedSandbox]):
         # Use NullRecorder by default (no-op) to avoid overhead when not needed
         self.recorder: Recorder = recorder or NullRecorder()
 
-        self.client = ThreadedAsyncSandboxClient(
-            max_workers=self.limits["client_max_workers"],
+        self.client = AsyncSandboxClient(
             max_connections=self.limits["client_max_connections"],
             max_keepalive_connections=self.limits["client_max_keepalive_connections"],
         )
@@ -436,8 +361,10 @@ class SandboxManager(ResourceManager[ManagedSandbox]):
 
         self._started = True
 
-        # Register client teardown on exit stack (runs last)
-        self._exit_stack.callback(self.client.teardown)
+        # Register client close on exit stack (runs last)
+        async def _close_client() -> None:
+            await self.client.close()
+        self._exit_stack.push_async_callback(_close_client)
 
         # Start GC if enabled and this is the first manager
         if self.enable_gc:
@@ -1088,9 +1015,9 @@ class SandboxManager(ResourceManager[ManagedSandbox]):
         sync_client = SandboxClient(APIClient())
         sync_client.bulk_delete(sandbox_ids=sandbox_ids)
 
-    def teardown(self) -> None:
-        """Shutdown the client thread pool."""
-        self.client.teardown()
+    async def teardown(self) -> None:
+        """Close the async client."""
+        await self.client.close()
 
     def get_summary(self) -> dict[str, Any]:
         """Get sandbox lifecycle metrics."""

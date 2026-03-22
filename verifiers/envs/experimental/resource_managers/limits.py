@@ -77,9 +77,6 @@ class SandboxLimits(TypedDict, total=False):
     """Max concurrent command executions (default: 100)"""
 
     # Client configuration
-    client_max_workers: int
-    """Thread pool size for async client wrapper (default: 100)"""
-
     client_max_connections: int
     """Max HTTP connections to sandbox API (default: 100)"""
 
@@ -119,7 +116,6 @@ DEFAULT_SANDBOX_LIMITS: SandboxLimits = {
     "max_concurrent_commands": 100,
 
     # Client configuration
-    "client_max_workers": 100,
     "client_max_connections": 100,
     "client_max_keepalive_connections": 50,
 }

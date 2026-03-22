@@ -44,7 +44,7 @@ class TestManagedSandbox:
 def mock_sandbox_client():
     """Create a mock sandbox client."""
     with patch(
-        "verifiers.envs.experimental.resource_managers.sandbox_manager.ThreadedAsyncSandboxClient"
+        "verifiers.envs.experimental.resource_managers.sandbox_manager.AsyncSandboxClient"
     ) as mock_class:
         mock_client = MagicMock()
 
@@ -72,8 +72,8 @@ def mock_sandbox_client():
         mock_result.stderr = ""
         mock_client.execute_command = AsyncMock(return_value=mock_result)
 
-        # Mock teardown method
-        mock_client.teardown = MagicMock()
+        # Mock close method (async)
+        mock_client.close = AsyncMock()
 
         mock_class.return_value = mock_client
         yield mock_client
@@ -285,10 +285,11 @@ class TestSandboxManager:
             # Should use sync client for bulk delete
             mock_sync_client.bulk_delete.assert_called()
 
-    def test_teardown(self, manager: SandboxManager, mock_sandbox_client):
-        """Test teardown shuts down the client."""
-        manager.teardown()
-        mock_sandbox_client.teardown.assert_called_once()
+    @pytest.mark.asyncio
+    async def test_teardown(self, manager: SandboxManager, mock_sandbox_client):
+        """Test teardown closes the client."""
+        await manager.teardown()
+        mock_sandbox_client.close.assert_called_once()
 
 
 class TestSandboxManagerErrors:
