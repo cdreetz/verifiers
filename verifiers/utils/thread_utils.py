@@ -24,6 +24,10 @@ def get_or_create_thread_attr(
 
 def get_or_create_thread_loop() -> asyncio.AbstractEventLoop:
     """Get or create event loop for current thread. Reuses loop to avoid closing it."""
-    thread_local_loop = get_or_create_thread_attr("loop", asyncio.new_event_loop)
-    asyncio.set_event_loop(thread_local_loop)
-    return thread_local_loop
+    thread_local = get_thread_local_storage()
+    loop = getattr(thread_local, "loop", None)
+    if loop is None:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        thread_local.loop = loop
+    return loop
