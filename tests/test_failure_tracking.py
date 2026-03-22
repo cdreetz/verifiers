@@ -139,7 +139,7 @@ class TestSandboxManagerErrorTracking:
     def sandbox_manager(self):
         """Create SandboxManager with mocked client."""
         with patch(
-            "verifiers.envs.experimental.resource_managers.sandbox_manager.ThreadedAsyncSandboxClient"
+            "verifiers.envs.experimental.resource_managers.sandbox_manager.AsyncSandboxClient"
         ) as MockClient:
             mock_client = MagicMock()
             MockClient.return_value = mock_client
