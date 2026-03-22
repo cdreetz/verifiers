@@ -8,7 +8,6 @@ These tests simulate sandbox failures and verify that:
 4. Infrastructure errors are distinguishable from model errors
 """
 
-import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -20,7 +19,6 @@ from verifiers.envs.experimental.resource_managers.base import (
     ResourceState,
 )
 from verifiers.envs.experimental.resource_managers.sandbox_manager import (
-    ManagedSandbox,
     SandboxManager,
 )
 from verifiers.envs.experimental.resource_managers.errors import (
