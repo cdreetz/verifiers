@@ -88,7 +88,7 @@ from verifiers.utils.tool_utils import convert_func_to_tool_def
 
 logger = logging.getLogger(__name__)
 
-_FIXED_REPL_TOOL_NAMES = frozenset({"llm_batch", "remove_conversation_turns"})
+_FIXED_REPL_TOOL_NAMES = frozenset({"llm_batch"})
 
 
 def _tool_display_name(tool: Callable) -> str:
@@ -276,16 +276,19 @@ def _ensure_rlm_metric_state(state: State) -> None:
     state.setdefault("_rlm_sub_llm_call_ids", {})
     state.setdefault("_rlm_sub_llm_batch_counts", {})
 
-    state.setdefault("_dropped_turns_count", 0)
-    state.setdefault("_drop_sequence", 0)
     state.setdefault("_keep_from_assistant_index", 0)
+    state.setdefault("_summary_text", "")
 
-    state.setdefault("compaction_count", 0)
-    state.setdefault("compaction_total_turns_dropped", 0)
-    state.setdefault("compaction_mean_remaining_turns", 0.0)
-    state.setdefault("compaction_mean_turns_between", 0.0)
-    state.setdefault("_compaction_remaining_turns_list", [])
-    state.setdefault("_compaction_at_root_llm_turns", [])
+    state.setdefault("summarize_count", 0)
+    state.setdefault("summarize_total_turns_dropped", 0)
+    state.setdefault("summarize_total_chars_dropped", 0)
+    state.setdefault("summarize_summary_length_chars", 0)
+    state.setdefault("summarize_char_compression_ratio", 0.0)
+    state.setdefault("summarize_mean_turns_per_call", 0.0)
+    state.setdefault("summarize_mean_remaining_turns", 0.0)
+    state.setdefault("summarize_mean_turns_between", 0.0)
+    state.setdefault("_summarize_remaining_turns_list", [])
+    state.setdefault("_summarize_at_root_llm_turns", [])
 
 
 def _update_rlm_repl_metrics(state: State, execution_seconds: float) -> None:
@@ -372,10 +375,14 @@ class RLMMonitorRubric(vf.Rubric):
         "repl_call_count",
         "repl_mean_time_seconds",
         "root_tool_call_count",
-        "compaction_count",
-        "compaction_total_turns_dropped",
-        "compaction_mean_remaining_turns",
-        "compaction_mean_turns_between",
+        "summarize_count",
+        "summarize_total_turns_dropped",
+        "summarize_total_chars_dropped",
+        "summarize_summary_length_chars",
+        "summarize_char_compression_ratio",
+        "summarize_mean_turns_per_call",
+        "summarize_mean_remaining_turns",
+        "summarize_mean_turns_between",
     ]
 
     def __init__(self, root_tool_names: list[str] | None = None, **kwargs):
@@ -1244,7 +1251,7 @@ In the end, the `ANSWER_CONTENT` environment variable must contain your answer. 
         root_tool_defs: list[vf.Tool],
         sub_tool_defs: list[vf.Tool],
         enable_sub_llms: bool = True,
-        allow_context_dropping: bool = False,
+        enable_summarization: bool = False,
         min_turns_in_context: int = 3,
     ) -> None:
         self.repl_language = repl_language
@@ -1259,7 +1266,7 @@ In the end, the `ANSWER_CONTENT` environment variable must contain your answer. 
         self.root_tool_defs = root_tool_defs
         self.sub_tool_defs = sub_tool_defs
         self.enable_sub_llms = enable_sub_llms
-        self.allow_context_dropping = allow_context_dropping
+        self.enable_summarization = enable_summarization
         self.min_turns_in_context = min_turns_in_context
 
     def build_base_system_prompt(self) -> str:
@@ -1370,17 +1377,20 @@ In the end, the `ANSWER_CONTENT` environment variable must contain your answer. 
 
     def build_context_dropping_note(self) -> str:
         """Return context-dropping documentation note, or empty string."""
-        if not self.allow_context_dropping:
+        if not self.enable_summarization:
             return ""
         return (
             "\n## Context Management\n\n"
-            "You can drop old conversation turns from context to free up space using "
-            '`remove_conversation_turns(n_turns, summary="")`.\n'
+            "You have a `summarize_turns` tool to drop old conversation turns "
+            "from context and replace them with a summary.\n"
             f"- At least {self.min_turns_in_context} turns must remain in context.\n"
             "- Use `n_turns=-1` to drop the maximum possible.\n"
-            "- Provide a `summary` to record what was in the dropped turns.\n"
+            "- Provide a `summary` describing the key findings and state from "
+            "the dropped turns.\n"
+            "- Summaries are cumulative: each call appends to the previous summary.\n"
+            "- The full summary is returned as the tool output and injected into "
+            "the first assistant message as a `<SUMMARY>` block.\n"
             "- Dropped turns are still accessible via the `.messages` file.\n"
-            "- Summaries are recorded in the `.summaries` file (JSONL).\n"
         )
 
     def build_root_budget_note(self) -> str:
@@ -2258,6 +2268,11 @@ class RLMEnv(vf.StatefulToolEnv):
         enable_sub_llms: If True (default), the root model can call sub-LLMs via
                    ``llm_batch()``. If False, ``llm_batch`` is not registered as a
                    tool and all sub-LLM-related prompt sections are omitted.
+        enable_summarization: If True, the root model gets a ``summarize_turns``
+                   tool to drop old conversation turns and replace them with a
+                   cumulative summary. Defaults to False.
+        min_turns_in_context: Minimum turns that must remain after summarization
+                   (default: 3). Only has effect when enable_summarization=True.
         max_output_length: Maximum length of code execution output
         max_sub_llm_parallelism: Maximum number of concurrent sub-LLM calls
         system_prompt: Custom system prompt (default: RLM standard prompt)
@@ -2312,6 +2327,8 @@ class RLMEnv(vf.StatefulToolEnv):
         sub_prompt_verbosity: Literal["light", "medium", "heavy"] = "light",
         root_prompt_verbosity: Literal["light", "medium", "heavy"] = "light",
         enable_sub_llms: bool = True,
+        enable_summarization: bool = False,
+        min_turns_in_context: int = 3,
         max_output_length: int = 8192,
         max_sub_llm_parallelism: int = 5,
         system_prompt: str | None = None,
@@ -2323,8 +2340,6 @@ class RLMEnv(vf.StatefulToolEnv):
         code_execution_timeout: int = 120,
         abort_on_code_timeout: bool = False,
         expose_message_history: bool = True,
-        allow_context_dropping: bool = False,
-        min_turns_in_context: int = 3,
         retain_filesystem_after_rollout: bool = False,
         sandbox_docker_image: str = "python:3.11-slim",
         sandbox_cpu_cores: int = 1,
@@ -2377,13 +2392,13 @@ class RLMEnv(vf.StatefulToolEnv):
         self.code_execution_timeout = code_execution_timeout
         self.abort_on_code_timeout = abort_on_code_timeout
         self.expose_message_history = expose_message_history
-        self.allow_context_dropping = allow_context_dropping
+        self.enable_summarization = enable_summarization
         self.min_turns_in_context = min_turns_in_context
-        if self.allow_context_dropping and not self.expose_message_history:
+        if self.enable_summarization and not self.expose_message_history:
             import warnings
 
             warnings.warn(
-                "allow_context_dropping=True but expose_message_history=False. "
+                "enable_summarization=True but expose_message_history=False. "
                 "The model won't be able to read dropped context from .messages. "
                 "Consider setting expose_message_history=True.",
                 UserWarning,
@@ -2493,7 +2508,7 @@ class RLMEnv(vf.StatefulToolEnv):
             root_tool_defs=self.root_tool_defs,
             sub_tool_defs=self.sub_tool_defs,
             enable_sub_llms=self.enable_sub_llms,
-            allow_context_dropping=self.allow_context_dropping,
+            enable_summarization=self.enable_summarization,
             min_turns_in_context=self.min_turns_in_context,
         )
 
@@ -2502,6 +2517,10 @@ class RLMEnv(vf.StatefulToolEnv):
             self.add_tool(self.call_bash_repl, args_to_skip=["state"])
         else:
             self.add_tool(self.call_python_repl, args_to_skip=["state"])
+
+        # Add summarize_turns as a standard tool (not a REPL tool)
+        if self.enable_summarization:
+            self.add_tool(self.summarize_turns, args_to_skip=["state"])
 
     def get_sandbox_request(self, state: State) -> CreateSandboxRequest:
         """Return the sandbox request for this rollout.
@@ -2572,158 +2591,7 @@ class RLMEnv(vf.StatefulToolEnv):
             llm_batch.__name__ = "llm_batch"
             tools.append(llm_batch)
 
-        if self.allow_context_dropping:
-
-            async def remove_conversation_turns(n_turns: int, summary: str = "") -> str:
-                """
-                Drop the oldest n_turns from your conversation context.
-
-                Dropped turns remain accessible via the .messages file.
-                Summaries are recorded in the .summaries file.
-
-                Args:
-                    n_turns: Number of oldest turns to drop. Use -1 to drop the
-                             maximum possible.
-                    summary: Optional summary of the dropped context.
-
-                Returns:
-                    Status message with turns dropped, turns remaining, and echoed summary.
-                """
-                context = self._root_tool_context_var.get()
-                if context is None:
-                    raise RuntimeError(
-                        "remove_conversation_turns called outside of a tool request context."
-                    )
-                return await self._handle_remove_conversation_turns(
-                    context["state"], n_turns, summary
-                )
-
-            remove_conversation_turns.__name__ = "remove_conversation_turns"
-            tools.append(remove_conversation_turns)
-
         return tools
-
-    async def _handle_remove_conversation_turns(
-        self, state: State, n_turns: int, summary: str
-    ) -> str:
-        """Core logic for the remove_conversation_turns root tool."""
-        rid = state.get("rollout_id", "?")
-        main_turn = self._main_turn_count(state)
-        keep_from = state.get("_keep_from_assistant_index", 0)
-        visible_turns = main_turn - keep_from
-        max_droppable = max(0, visible_turns - self.min_turns_in_context)
-
-        if n_turns == -1:
-            n_turns = max_droppable
-
-        if n_turns <= 0:
-            logger.debug(
-                "[%s] main turn %d: context drop: nothing to drop "
-                "(n_turns=%d, %d visible)",
-                rid,
-                main_turn,
-                n_turns,
-                visible_turns,
-            )
-            return (
-                f"Nothing to drop (n_turns={n_turns}). "
-                f"Currently {visible_turns} turn(s) visible in context."
-            )
-
-        if n_turns > max_droppable:
-            logger.warning(
-                "[%s] main turn %d: context drop rejected: requested %d turn(s) "
-                "but max droppable is %d (%d visible, min=%d)",
-                rid,
-                main_turn,
-                n_turns,
-                max_droppable,
-                visible_turns,
-                self.min_turns_in_context,
-            )
-            return (
-                f"Cannot drop {n_turns} turn(s). "
-                f"You have {visible_turns} turn(s) visible in context and "
-                f"min_turns_in_context={self.min_turns_in_context}. "
-                f"Maximum droppable: {max_droppable}. No turns were dropped."
-            )
-
-        state["_keep_from_assistant_index"] = keep_from + n_turns
-        state["_dropped_turns_count"] = state.get("_dropped_turns_count", 0) + n_turns
-        state["_drop_sequence"] = state.get("_drop_sequence", 0) + 1
-        new_visible = visible_turns - n_turns
-
-        logger.debug(
-            "[%s] main turn %d: context drop: %d turn(s) dropped "
-            "(%d visible -> %d visible, keep_from=%d, summary=%s)",
-            rid,
-            main_turn,
-            n_turns,
-            visible_turns,
-            new_visible,
-            state["_keep_from_assistant_index"],
-            "yes" if summary.strip() else "no",
-        )
-
-        # Update context dropping metrics
-        _ensure_rlm_metric_state(state)
-        state["compaction_count"] += 1
-        state["compaction_total_turns_dropped"] = state["_dropped_turns_count"]
-
-        remaining_list: list[int] = state["_compaction_remaining_turns_list"]
-        remaining_list.append(new_visible)
-        state["compaction_mean_remaining_turns"] = sum(remaining_list) / len(
-            remaining_list
-        )
-
-        at_turns: list[int] = state["_compaction_at_root_llm_turns"]
-        at_turns.append(main_turn)
-        if len(at_turns) >= 2:
-            gaps = [at_turns[i] - at_turns[i - 1] for i in range(1, len(at_turns))]
-            state["compaction_mean_turns_between"] = sum(gaps) / len(gaps)
-
-        await self._upload_summary(state, n_turns, summary, new_visible)
-
-        parts = [
-            f"Dropped {n_turns} oldest turn(s) from context.",
-            f"Turns now visible: {new_visible}.",
-        ]
-        if summary:
-            parts.append(f"Summary recorded: {summary}")
-        parts.append("Dropped turns are still accessible via .messages.")
-        return "\n".join(parts)
-
-    async def _upload_summary(
-        self, state: State, n_turns: int, summary: str, turns_remaining: int
-    ) -> None:
-        """Append a summary entry to .summaries JSONL in the sandbox."""
-        entry = json.dumps(
-            {
-                "n_turns_dropped": n_turns,
-                "summary": summary,
-                "timestamp": time.time(),
-                "turns_remaining": turns_remaining,
-            },
-            ensure_ascii=False,
-        )
-        entry_line = entry + "\n"
-
-        session = self._executor._get_session(state)
-        if not session.sandbox_id:
-            return
-        fs_root = session.sandbox_fs_root or state.get("rlm_fs_root_remote", "")
-        remote_path = f"{fs_root}/.summaries"
-        delta_b64 = base64.b64encode(entry_line.encode("utf-8")).decode("ascii")
-        cmd = f"echo '{delta_b64}' | base64 -d >> {remote_path}"
-
-        try:
-            await self._executor._execute_sandbox_command(
-                session.sandbox_id,
-                f"bash -lc {shlex.quote(cmd)}",
-                timeout=30,
-            )
-        except Exception as e:
-            logger.warning("Failed to upload summary: %s", e)
 
     def _build_worker_env_vars(self, state: State) -> dict[str, str]:
         return {
@@ -3572,8 +3440,8 @@ class RLMEnv(vf.StatefulToolEnv):
         state: State,
         **kwargs,
     ) -> dict[str, Any]:
-        """Inject state into REPL tool args."""
-        if tool_name in {"call_python_repl", "call_bash_repl"}:
+        """Inject state into REPL and summarize_turns tool args."""
+        if tool_name in {"call_python_repl", "call_bash_repl", "summarize_turns"}:
             updated_args = dict(tool_args)
             updated_args["state"] = state
             return updated_args
@@ -3671,9 +3539,8 @@ class RLMEnv(vf.StatefulToolEnv):
             state["_messages_uploaded_count"] = 0
 
             # Initialize context dropping state
-            state["_dropped_turns_count"] = 0
-            state["_drop_sequence"] = 0
             state["_keep_from_assistant_index"] = 0
+            state["_summary_text"] = ""
 
             _ensure_rlm_metric_state(state)
 
@@ -3857,8 +3724,16 @@ class RLMEnv(vf.StatefulToolEnv):
     # Message History Upload
     # =========================================================================
 
+    _SUMMARY_BLOCK_RE = re.compile(r"<SUMMARY>\n.*?\n</SUMMARY>\n\n", re.DOTALL)
+
     def _build_message_history(self, state: State) -> list[dict[str, Any]]:
-        """Build the full serialized message history from the trajectory."""
+        """Build the serialized message history from the trajectory.
+
+        Reads from the last main trajectory step (which has the full
+        cumulative conversation in its prompt) and strips any injected
+        ``<SUMMARY>`` blocks so that ``.messages`` reflects the raw
+        conversation without summarization artifacts.
+        """
         last_main = self._last_main_trajectory_step(state)
         if last_main is None:
             return []
@@ -3866,9 +3741,15 @@ class RLMEnv(vf.StatefulToolEnv):
         serialized: list[dict[str, Any]] = []
         for msg in messages:
             if hasattr(msg, "model_dump"):
-                serialized.append(msg.model_dump(exclude_none=True))
+                entry = msg.model_dump(exclude_none=True)
             elif isinstance(msg, dict):
-                serialized.append(dict(msg))
+                entry = dict(msg)
+            else:
+                continue
+            content = entry.get("content")
+            if isinstance(content, str) and "<SUMMARY>" in content:
+                entry["content"] = self._SUMMARY_BLOCK_RE.sub("", content)
+            serialized.append(entry)
         return serialized
 
     async def _upload_message_history(self, state: State) -> None:
@@ -3993,6 +3874,171 @@ class RLMEnv(vf.StatefulToolEnv):
             append_execution_time=True,
         )
 
+    async def summarize_turns(self, n_turns: int, summary: str, state: Any) -> str:
+        """Drop the oldest n_turns from context and record a cumulative summary.
+
+        The summary is appended to previous summaries and injected into the
+        first remaining assistant message as a <SUMMARY> block.
+
+        Args:
+            n_turns: Number of oldest visible turns to drop. Use -1 to drop
+                     the maximum possible.
+            summary: Summary of the content in the dropped turns.
+
+        Returns:
+            The full cumulative summary (all prior summaries + this one).
+        """
+        _ensure_rlm_metric_state(state)
+        rid = state.get("rollout_id", "?")
+        main_turn = self._main_turn_count(state)
+        keep_from = state.get("_keep_from_assistant_index", 0)
+        visible_turns = main_turn - keep_from
+        max_droppable = max(0, visible_turns - self.min_turns_in_context)
+
+        if n_turns == -1:
+            n_turns = max_droppable
+
+        if n_turns <= 0:
+            logger.debug(
+                "[%s] main turn %d: summarize_turns: nothing to drop "
+                "(n_turns=%d, %d visible)",
+                rid,
+                main_turn,
+                n_turns,
+                visible_turns,
+            )
+            return (
+                f"Nothing to drop (n_turns={n_turns}). "
+                f"Currently {visible_turns} turn(s) visible in context."
+            )
+
+        if n_turns > max_droppable:
+            logger.warning(
+                "[%s] main turn %d: summarize_turns rejected: requested %d turn(s) "
+                "but max droppable is %d (%d visible, min=%d)",
+                rid,
+                main_turn,
+                n_turns,
+                max_droppable,
+                visible_turns,
+                self.min_turns_in_context,
+            )
+            return (
+                f"Cannot drop {n_turns} turn(s). "
+                f"You have {visible_turns} turn(s) visible in context and "
+                f"min_turns_in_context={self.min_turns_in_context}. "
+                f"Maximum droppable: {max_droppable}. No turns were dropped."
+            )
+
+        # Compute absolute turn range (1-indexed for display)
+        range_start = keep_from + 1
+        range_end = keep_from + n_turns
+
+        # Compute chars of dropped messages
+        chars_dropped = self._compute_dropped_chars(state, n_turns)
+
+        # Update state
+        state["_keep_from_assistant_index"] = keep_from + n_turns
+        new_visible = visible_turns - n_turns
+
+        # Append to cumulative summary
+        section = f"[Turns {range_start}-{range_end}] {summary}"
+        prev_summary = state.get("_summary_text", "")
+        state["_summary_text"] = (
+            f"{prev_summary}\n{section}" if prev_summary else section
+        )
+
+        logger.debug(
+            "[%s] main turn %d: summarize_turns: %d turn(s) dropped "
+            "(%d visible -> %d visible, keep_from=%d)",
+            rid,
+            main_turn,
+            n_turns,
+            visible_turns,
+            new_visible,
+            state["_keep_from_assistant_index"],
+        )
+
+        # Update metrics
+        state["summarize_count"] += 1
+        state["summarize_total_turns_dropped"] += n_turns
+        state["summarize_total_chars_dropped"] += chars_dropped
+        state["summarize_summary_length_chars"] = len(state["_summary_text"])
+        if state["summarize_summary_length_chars"] > 0:
+            state["summarize_char_compression_ratio"] = (
+                state["summarize_total_chars_dropped"]
+                / state["summarize_summary_length_chars"]
+            )
+        state["summarize_mean_turns_per_call"] = (
+            state["summarize_total_turns_dropped"] / state["summarize_count"]
+        )
+
+        remaining_list: list[int] = state["_summarize_remaining_turns_list"]
+        remaining_list.append(new_visible)
+        state["summarize_mean_remaining_turns"] = sum(remaining_list) / len(
+            remaining_list
+        )
+
+        at_turns: list[int] = state["_summarize_at_root_llm_turns"]
+        at_turns.append(main_turn)
+        if len(at_turns) >= 2:
+            gaps = [at_turns[i] - at_turns[i - 1] for i in range(1, len(at_turns))]
+            state["summarize_mean_turns_between"] = sum(gaps) / len(gaps)
+
+        return state["_summary_text"]
+
+    def _compute_dropped_chars(self, state: State, n_turns: int) -> int:
+        """Compute the total character length of messages being dropped.
+
+        The last trajectory step's prompt already has prior context dropping
+        applied, so the first ``n_turns`` assistant messages (and their
+        following tool messages) in that prompt are exactly the ones being
+        removed by this call.
+        """
+        last_main = self._last_main_trajectory_step(state)
+        if last_main is None:
+            return 0
+        messages = concat_messages([last_main["prompt"], last_main["completion"]])
+
+        assistant_indices = [
+            i
+            for i, msg in enumerate(messages)
+            if getattr(msg, "role", None) == "assistant"
+            or (isinstance(msg, dict) and msg.get("role") == "assistant")
+        ]
+        if not assistant_indices or n_turns <= 0:
+            return 0
+
+        # Drop the first n_turns assistant messages (relative to the current
+        # already-truncated view).
+        drop_start = assistant_indices[0]
+        if n_turns >= len(assistant_indices):
+            drop_end = len(messages)
+        else:
+            drop_end = assistant_indices[n_turns]
+
+        total_chars = 0
+        for msg in messages[drop_start:drop_end]:
+            content = getattr(msg, "content", None)
+            if content is None:
+                # Count tool call arguments for assistant messages
+                tool_calls = getattr(msg, "tool_calls", None)
+                if tool_calls:
+                    for tc in tool_calls:
+                        total_chars += len(getattr(tc, "arguments", "") or "")
+                continue
+            if isinstance(content, str):
+                total_chars += len(content)
+            elif isinstance(content, list):
+                for part in content:
+                    if isinstance(part, dict):
+                        total_chars += len(str(part.get("text", "")))
+                    else:
+                        total_chars += len(str(part))
+            else:
+                total_chars += len(str(content))
+        return total_chars
+
     def _last_main_trajectory_step(self, state: State) -> TrajectoryStep | None:
         """Find the last trajectory step belonging to the main (root) model."""
         main_id = state.get("trajectory_id")
@@ -4066,14 +4112,20 @@ class RLMEnv(vf.StatefulToolEnv):
             messages = concat_messages([prev_turn_prompt, prev_turn_completion])
 
             keep_from = state.get("_keep_from_assistant_index", 0)
-            if keep_from > 0:
-                messages = self._apply_context_dropping(messages, keep_from)
+            summary_text = state.get("_summary_text", "")
+            if keep_from > 0 or summary_text:
+                messages = self._apply_context_dropping(
+                    messages, keep_from, summary_text=summary_text
+                )
 
             env_response = await self.env_response(messages, state)
             return concat_messages([messages, env_response])
 
     def _apply_context_dropping(
-        self, messages: Messages, keep_from_assistant_index: int
+        self,
+        messages: Messages,
+        keep_from_assistant_index: int,
+        summary_text: str = "",
     ) -> Messages:
         """Drop all turns before the *keep_from_assistant_index*-th assistant message.
 
@@ -4081,8 +4133,11 @@ class RLMEnv(vf.StatefulToolEnv):
         the scaffolded user message, etc.). A "turn" is one assistant message plus
         all subsequent tool messages. Idempotent: if the messages are already
         truncated past the index, returns them unchanged.
+
+        If *summary_text* is non-empty, it is prepended as a ``<SUMMARY>`` block
+        to the content of the first remaining assistant message.
         """
-        if keep_from_assistant_index <= 0:
+        if keep_from_assistant_index <= 0 and not summary_text:
             return messages
 
         # Find turn boundaries (each assistant message starts a new turn)
@@ -4093,14 +4148,62 @@ class RLMEnv(vf.StatefulToolEnv):
             or (isinstance(msg, dict) and msg.get("role") == "assistant")
         ]
 
-        if not assistant_indices or keep_from_assistant_index >= len(assistant_indices):
+        if not assistant_indices:
             return messages
 
         # Preserve everything before the first assistant message (system msgs,
         # scaffolded user msg, etc.), then keep from the target turn onward.
+        # If the index exceeds available assistants (prior dropping already
+        # truncated the stored prompt), keep all remaining messages.
         preamble = list(messages[: assistant_indices[0]])
-        keep_from = assistant_indices[keep_from_assistant_index]
-        return preamble + list(messages[keep_from:])
+        if keep_from_assistant_index < len(assistant_indices):
+            remaining = list(messages[assistant_indices[keep_from_assistant_index] :])
+        else:
+            remaining = list(messages[assistant_indices[0] :])
+
+        # Inject or replace summary in the first remaining assistant message
+        if summary_text and remaining:
+            first_asst = remaining[0]
+            summary_block = f"<SUMMARY>\n{summary_text}\n</SUMMARY>\n\n"
+            content = getattr(first_asst, "content", None)
+            if isinstance(content, str):
+                # Strip any existing summary block before prepending the new one
+                content = re.sub(
+                    r"<SUMMARY>\n.*?\n</SUMMARY>\n\n",
+                    "",
+                    content,
+                    count=1,
+                    flags=re.DOTALL,
+                )
+                remaining[0] = AssistantMessage(
+                    content=summary_block + content,
+                    tool_calls=getattr(first_asst, "tool_calls", None),
+                    reasoning_content=getattr(first_asst, "reasoning_content", None),
+                    thinking_blocks=getattr(first_asst, "thinking_blocks", None),
+                )
+            elif isinstance(content, list):
+                # Remove any existing summary text block, then prepend new one
+                filtered = [
+                    part
+                    for part in content
+                    if not (
+                        isinstance(part, dict)
+                        and part.get("type") == "text"
+                        and "<SUMMARY>" in str(part.get("text", ""))
+                    )
+                ]
+                new_content = [
+                    {"type": "text", "text": summary_block},
+                    *filtered,
+                ]
+                remaining[0] = AssistantMessage(
+                    content=new_content,
+                    tool_calls=getattr(first_asst, "tool_calls", None),
+                    reasoning_content=getattr(first_asst, "reasoning_content", None),
+                    thinking_blocks=getattr(first_asst, "thinking_blocks", None),
+                )
+
+        return preamble + remaining
 
     async def env_response(
         self, messages: Messages, state: State, **kwargs
