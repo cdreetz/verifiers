@@ -112,6 +112,19 @@ api_client_type = "anthropic_messages"
 
 Each endpoint entry supports an optional `api_client_type` field to select the client implementation (defaults to `"openai_chat_completions"`). Use `"anthropic_messages"` for Anthropic models when calling the Anthropic API directly.
 
+Optional HTTP headers for inference requests use a short TOML key `headers` (inline table). The alias `extra_headers` is accepted with the same shape; do not set both on one row.
+
+```toml
+[[endpoint]]
+endpoint_id = "my-proxy"
+model = "gpt-4.1-mini"
+url = "https://api.example/v1"
+key = "OPENAI_API_KEY"
+headers = { "X-Custom-Header" = "value" }
+```
+
+In `[[eval]]` TOML configs you can set extra headers as `headers = { ... }` and/or as a list `header = ["Name: Value", ...]` (same form as repeated `--header`). Merge order is: registry row, then the `headers` table, then each `header` / `--header` line, with later entries overriding the same name.
+
 To define equivalent replicas, add multiple `[[endpoint]]` entries with the same `endpoint_id`.
 
 Then use the alias directly:
@@ -159,10 +172,13 @@ Multiple rollouts per example enable metrics like pass@k and help measure varian
 | `--no-interleave-scoring` | `-N` | false | Disable interleaved scoring |
 | `--independent-scoring` | `-i` | false | Score each rollout individually instead of by group |
 | `--max-retries` | — | 0 | Retries per rollout on transient `InfraError` |
+| `--num-workers` | `-w` | `auto` | Number of env server worker processes (`auto` = concurrency ÷ 256, minimum 1) |
 
 By default, scoring runs interleaved with generation. Use `--no-interleave-scoring` to score all rollouts after generation completes.
 
 The `--max-retries` flag enables automatic retry with exponential backoff when rollouts fail due to transient infrastructure errors (e.g., sandbox timeouts, API failures).
+
+The `--num-workers` flag controls how many worker processes the env server spawns. Each worker owns its own environment instance and runs rollouts independently. The default `auto` scales with concurrency.
 
 ### Display
 
