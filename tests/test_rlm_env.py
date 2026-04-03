@@ -2855,15 +2855,6 @@ class TestSummarizeTurns:
     # System prompt
     # =====================================================================
 
-    def test_system_prompt_includes_note_when_enabled(self, env_with_summarize):
-        prompt = env_with_summarize.prompt_builder.build_system_prompt()
-        assert "summarize_turns" in prompt
-        assert "<SUMMARY>" in prompt
-
-    def test_system_prompt_excludes_note_when_disabled(self, env_without_summarize):
-        prompt = env_without_summarize.prompt_builder.build_system_prompt()
-        assert "summarize_turns" not in prompt
-
     # =====================================================================
     # Basic summarize_turns behavior
     # =====================================================================
@@ -3253,8 +3244,8 @@ class TestSummarizeTurns:
         assert state["summarize_total_chars_dropped"] > 0
         assert state["summarize_summary_length_chars"] == len(state["_summary_text"])
         assert state["summarize_char_compression_ratio"] == pytest.approx(
-            state["summarize_total_chars_dropped"]
-            / state["summarize_summary_length_chars"]
+            state["summarize_summary_length_chars"]
+            / state["summarize_total_chars_dropped"]
         )
 
     # =====================================================================

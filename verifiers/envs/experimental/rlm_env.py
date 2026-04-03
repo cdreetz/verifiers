@@ -291,6 +291,7 @@ def _ensure_rlm_metric_state(state: State) -> None:
     state.setdefault("_summary_text", "")
 
     state.setdefault("summarize_count", 0)
+    state.setdefault("summarize_rejected_count", 0)
     state.setdefault("summarize_total_turns_dropped", 0)
     state.setdefault("summarize_total_chars_dropped", 0)
     state.setdefault("summarize_summary_length_chars", 0)
@@ -413,6 +414,7 @@ class RLMMonitorRubric(vf.Rubric):
         "sub_llm_max_turns_reached_frac",
         "max_turns_in_context_stopped",
         "summarize_count",
+        "summarize_rejected_count",
         "summarize_total_turns_dropped",
         "summarize_total_chars_dropped",
         "summarize_summary_length_chars",
@@ -1383,22 +1385,12 @@ In the end, the `ANSWER_CONTENT` environment variable must contain your answer. 
         return self.MESSAGE_HISTORY_NOTE_PYTHON
 
     def build_context_dropping_note(self) -> str:
-        """Return context-dropping documentation note, or empty string."""
-        if not self.enable_summarization:
-            return ""
-        return (
-            "\n## Context Management\n\n"
-            "You have a `summarize_turns` tool to drop old conversation turns "
-            "from context and replace them with a summary.\n"
-            f"- At least {self.min_turns_in_context} turns must remain in context.\n"
-            "- Use `n_turns=-1` to drop the maximum possible.\n"
-            "- Provide a `summary` describing the key findings and state from "
-            "the dropped turns.\n"
-            "- Summaries are cumulative: each call appends to the previous summary.\n"
-            "- The full summary is returned as the tool output and injected into "
-            "the first assistant message as a `<SUMMARY>` block.\n"
-            "- Dropped turns are still accessible via the `.messages` file.\n"
-        )
+        """Return context-dropping documentation note, or empty string.
+
+        Currently returns empty — the ``summarize_turns`` tool docstring and
+        rejection messages provide all necessary information to the model.
+        """
+        return ""
 
     def build_root_budget_note(self) -> str:
         """Return root-model token budget note, or empty string."""
@@ -2354,12 +2346,14 @@ class RLMEnv(vf.StatefulToolEnv):
             root_tool_non_llm_mean_time_seconds: Mean wall-clock time per
                 non-llm_batch root tool call.
         Summarization:
-            summarize_count: Number of summarize_turns calls.
+            summarize_count: Number of successful summarize_turns calls.
+            summarize_rejected_count: Number of rejected summarize_turns calls
+                (nothing to drop or requested more than allowed).
             summarize_total_turns_dropped: Total turns dropped across all calls.
             summarize_total_chars_dropped: Total characters dropped.
             summarize_summary_length_chars: Current cumulative summary length.
-            summarize_char_compression_ratio: Ratio of dropped chars to summary
-                length.
+            summarize_char_compression_ratio: Ratio of summary length to dropped
+                chars (lower = better compression, 0.0 = no summarization).
             summarize_mean_turns_per_call: Mean turns dropped per call.
             summarize_mean_remaining_turns: Mean visible turns remaining after
                 each call.
@@ -3911,6 +3905,7 @@ class RLMEnv(vf.StatefulToolEnv):
                 n_turns,
                 visible_turns,
             )
+            state["summarize_rejected_count"] += 1
             return (
                 f"Nothing to drop (n_turns={n_turns}). "
                 f"Currently {visible_turns} turn(s) visible in context."
@@ -3927,6 +3922,7 @@ class RLMEnv(vf.StatefulToolEnv):
                 visible_turns,
                 self.min_turns_in_context,
             )
+            state["summarize_rejected_count"] += 1
             return (
                 f"Cannot drop {n_turns} turn(s). "
                 f"You have {visible_turns} turn(s) visible in context and "
@@ -3968,10 +3964,10 @@ class RLMEnv(vf.StatefulToolEnv):
         state["summarize_total_turns_dropped"] += n_turns
         state["summarize_total_chars_dropped"] += chars_dropped
         state["summarize_summary_length_chars"] = len(state["_summary_text"])
-        if state["summarize_summary_length_chars"] > 0:
+        if state["summarize_total_chars_dropped"] > 0:
             state["summarize_char_compression_ratio"] = (
-                state["summarize_total_chars_dropped"]
-                / state["summarize_summary_length_chars"]
+                state["summarize_summary_length_chars"]
+                / state["summarize_total_chars_dropped"]
             )
         state["summarize_mean_turns_per_call"] = (
             state["summarize_total_turns_dropped"] / state["summarize_count"]
