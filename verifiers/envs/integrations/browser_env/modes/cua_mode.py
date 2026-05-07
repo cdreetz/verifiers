@@ -17,6 +17,12 @@ import aiohttp
 import tenacity as tc
 from tenacity import AsyncRetrying
 import verifiers as vf
+from verifiers.telemetry import (
+    record_counter,
+    record_error,
+    record_up_down,
+    timed,
+)
 
 
 # Conditional imports for sandbox mode
@@ -366,6 +372,7 @@ class CUAMode:
         client = await self._get_sandbox_client()
         sandbox = await client.create(self._sandbox_request.model_copy())  # type: ignore[union-attr]
         self.active_sandboxes.add(sandbox.id)
+        record_counter("sandbox_created")
         if self.logger:
             self.logger.debug(f"Created sandbox {sandbox.id}")
         return sandbox.id
@@ -376,6 +383,10 @@ class CUAMode:
         async for attempt in self.retrying:  # type: ignore[union-attr]
             with attempt:
                 if previous_sandbox_id is not None:
+                    record_counter(
+                        "browser_retry_count",
+                        attributes={"operation": "create_sandbox"},
+                    )
                     try:
                         await self._delete_sandbox(previous_sandbox_id)
                     except Exception:
@@ -396,6 +407,7 @@ class CUAMode:
         client = await self._get_sandbox_client()
         await client.delete(sandbox_id)
         self.active_sandboxes.discard(sandbox_id)
+        record_counter("sandbox_deleted")
         if self.logger:
             self.logger.debug(f"Deleted sandbox {sandbox_id}")
 
@@ -696,14 +708,23 @@ class CUAMode:
         sandbox_id: str | None = None,
     ) -> dict:
         """Execute a browser action using the appropriate method based on mode."""
-        if self._execution_mode == "local":
-            return await self._execute_action_http(session_id, action, tool_call_id)
-        else:
-            if sandbox_id is None:
-                raise ValueError("sandbox_id is required for sandbox mode")
-            return await self._execute_action_curl(
-                session_id, action, sandbox_id, tool_call_id
-            )
+        action_type = action.get("type", "unknown")
+        attrs = {"action_type": action_type, "mode": self._execution_mode}
+        with timed(
+            "browser_action_duration",
+            counter_name="browser_action_count",
+            error_counter_name="browser_action_error",
+            span_name="browser_action",
+            attributes=attrs,
+        ):
+            if self._execution_mode == "local":
+                return await self._execute_action_http(session_id, action, tool_call_id)
+            else:
+                if sandbox_id is None:
+                    raise ValueError("sandbox_id is required for sandbox mode")
+                return await self._execute_action_curl(
+                    session_id, action, sandbox_id, tool_call_id
+                )
 
     # ==================== Screenshot Methods ====================
 
@@ -830,11 +851,14 @@ class CUAMode:
                 with self._sessions_lock:
                     self.active_sessions.add(session_id)
 
+                record_counter("browser_session_created", attributes={"mode": "local"})
+                record_up_down("browser_session_active", 1, {"mode": "local"})
                 state["session_id"] = session_id
                 state["browser_state"] = result.get("state", {})
             except vf.Error:
                 raise
             except Exception as e:
+                record_error("browser", e, {"mode": "local", "operation": "setup"})
                 raise vf.BrowserSandboxError(e)
         else:
             # Sandbox mode: create sandbox, set up server, create session
@@ -874,6 +898,10 @@ class CUAMode:
                 with self._sessions_lock:
                     self.active_sessions.add(session_id)
 
+                record_counter(
+                    "browser_session_created", attributes={"mode": "sandbox"}
+                )
+                record_up_down("browser_session_active", 1, {"mode": "sandbox"})
                 state["session_id"] = session_id
                 state["browser_state"] = result.get("state", {})
             except vf.Error:
@@ -882,6 +910,7 @@ class CUAMode:
             except Exception as e:
                 # Wrap all other exceptions in BrowserSandboxError
                 # This ensures cleanup_session is called via stop_errors mechanism
+                record_error("browser", e, {"mode": "sandbox", "operation": "setup"})
                 raise vf.BrowserSandboxError(e)
         return state
 
@@ -913,7 +942,14 @@ class CUAMode:
                             await self._destroy_session_http(session_id)
                     with self._sessions_lock:
                         self.active_sessions.discard(session_id)
+                    record_counter(
+                        "browser_session_destroyed", attributes={"mode": "local"}
+                    )
+                    record_up_down("browser_session_active", -1, {"mode": "local"})
                 except Exception as e:
+                    record_error(
+                        "browser", e, {"mode": "local", "operation": "cleanup"}
+                    )
                     if self.logger:
                         self.logger.warning(
                             f"Failed to destroy session {session_id}: {e}"
@@ -929,7 +965,14 @@ class CUAMode:
                             await self._destroy_session_curl(session_id, sandbox_id)
                     with self._sessions_lock:
                         self.active_sessions.discard(session_id)
+                    record_counter(
+                        "browser_session_destroyed", attributes={"mode": "sandbox"}
+                    )
+                    record_up_down("browser_session_active", -1, {"mode": "sandbox"})
                 except Exception as e:
+                    record_error(
+                        "browser", e, {"mode": "sandbox", "operation": "cleanup"}
+                    )
                     if self.logger:
                         self.logger.warning(
                             f"Failed to destroy session {session_id}: {e}"
@@ -941,6 +984,7 @@ class CUAMode:
                         with attempt:
                             await self._delete_sandbox(sandbox_id)
                 except Exception as e:
+                    record_error("sandbox", e, {"operation": "cleanup"})
                     if self.logger:
                         self.logger.warning(
                             f"Failed to delete sandbox {sandbox_id}: {e}"

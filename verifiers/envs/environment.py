@@ -31,6 +31,13 @@ from typing import (
 from verifiers.clients import Client, resolve_client
 from verifiers.decorators import discover_decorated
 from verifiers.serve import ZMQEnvClient
+from verifiers.telemetry import (
+    record_error,
+    record_histogram,
+    record_tokens,
+    record_up_down,
+    timed,
+)
 from verifiers.utils.client_utils import (
     resolve_client_config,
     resolve_client_configs,
@@ -539,16 +546,29 @@ class Environment(ABC):
 
         self._get_usage_tracker(state, create_if_missing=True)
 
-        response = await client.get_response(
-            prompt=prompt,
-            model=model,
-            tools=tool_defs,
-            sampling_args=sampling_args,
-            state=state,
-        )
-        self.increment_state_usage_from_response(state, response)
-
-        return response
+        model_attrs = {"env_id": self.env_id, "model": model}
+        with timed(
+            "model_request_duration",
+            counter_name="model_request_count",
+            error_counter_name="model_request_error",
+            span_name="model_request",
+            attributes=model_attrs,
+        ) as ctx:
+            try:
+                response = await client.get_response(
+                    prompt=prompt,
+                    model=model,
+                    tools=tool_defs,
+                    sampling_args=sampling_args,
+                    state=state,
+                )
+                self.increment_state_usage_from_response(state, response)
+                ctx["status"] = "ok"
+                return response
+            except Exception as exc:
+                ctx["status"] = "error"
+                record_error("model", exc, model_attrs)
+                raise
 
     @final
     async def init_state(
@@ -685,22 +705,50 @@ class Environment(ABC):
         model: str,
         sampling_args: SamplingArgs,
     ) -> State:
-        state = await self.rollout(
-            input,
-            client,
-            model,
-            sampling_args,
-        )
+        attrs = {"env_id": self.env_id, "model": model}
+        with timed(
+            "rollout_duration",
+            counter_name="rollout_count",
+            error_counter_name="error_count",
+            span_name="rollout",
+            attributes=attrs,
+        ) as ctx:
+            record_up_down("rollout_active", 1, attrs)
+            try:
+                state = await self.rollout(
+                    input,
+                    client,
+                    model,
+                    sampling_args,
+                )
 
-        state["timing"].scoring.start = time.time()
-        if self.score_rollouts:
-            await self.rubric.score_rollout(state)
-        else:
-            await self.rubric.dummy_score_rollout(state)
-        state["timing"].scoring.end = time.time()
+                state["timing"].scoring.start = time.time()
+                scoring_t0 = time.monotonic()
+                if self.score_rollouts:
+                    await self.rubric.score_rollout(state)
+                else:
+                    await self.rubric.dummy_score_rollout(state)
+                state["timing"].scoring.end = time.time()
+                record_histogram(
+                    "scoring_duration", time.monotonic() - scoring_t0, attrs
+                )
 
-        await self.rubric.cleanup(state)
-        return state
+                await self.rubric.cleanup(state)
+
+                usage = self.get_state_usage(state)
+                if usage is not None:
+                    record_tokens(usage["input_tokens"], usage["output_tokens"], attrs)
+                    ctx["input_tokens"] = int(usage["input_tokens"])
+                    ctx["output_tokens"] = int(usage["output_tokens"])
+
+                ctx["status"] = "completed"
+                return state
+            except Exception as exc:
+                ctx["status"] = "error"
+                record_error("rollout", exc, attrs)
+                raise
+            finally:
+                record_up_down("rollout_active", -1, attrs)
 
     async def _run_group_states(
         self,
@@ -709,32 +757,55 @@ class Environment(ABC):
         model: str,
         sampling_args: SamplingArgs,
     ) -> list[State]:
-        rollout_tasks = [
-            self.rollout(
-                input,
-                client,
-                model,
-                sampling_args,
-            )
-            for input in group_inputs
-        ]
-        group_states = await asyncio.gather(*rollout_tasks)
+        attrs = {"env_id": self.env_id, "model": model, "group_size": len(group_inputs)}
+        with timed(
+            "group_duration",
+            counter_name="group_count",
+            error_counter_name="error_count",
+            span_name="group",
+            attributes=attrs,
+        ) as ctx:
+            rollout_tasks = [
+                self.rollout(
+                    input,
+                    client,
+                    model,
+                    sampling_args,
+                )
+                for input in group_inputs
+            ]
+            group_states = await asyncio.gather(*rollout_tasks)
 
-        start_scoring = time.time()
-        for state in group_states:
-            state["timing"].scoring.start = start_scoring
-        if self.score_rollouts:
-            await self.rubric.score_group(group_states)
-        else:
-            await self.rubric.dummy_score_group(group_states)
-        end_scoring = time.time()
-        for state in group_states:
-            state["timing"].scoring.end = end_scoring
+            start_scoring = time.time()
+            scoring_t0 = time.monotonic()
+            for state in group_states:
+                state["timing"].scoring.start = start_scoring
+            if self.score_rollouts:
+                await self.rubric.score_group(group_states)
+            else:
+                await self.rubric.dummy_score_group(group_states)
+            end_scoring = time.time()
+            for state in group_states:
+                state["timing"].scoring.end = end_scoring
+            record_histogram("scoring_duration", time.monotonic() - scoring_t0, attrs)
 
-        for state in group_states:
-            await self.rubric.cleanup(state)
+            for state in group_states:
+                await self.rubric.cleanup(state)
 
-        return group_states
+            total_in = 0.0
+            total_out = 0.0
+            for state in group_states:
+                usage = self.get_state_usage(state)
+                if usage is not None:
+                    total_in += usage["input_tokens"]
+                    total_out += usage["output_tokens"]
+            if total_in > 0 or total_out > 0:
+                record_tokens(total_in, total_out, attrs)
+            ctx["input_tokens"] = int(total_in)
+            ctx["output_tokens"] = int(total_out)
+            ctx["status"] = "completed"
+
+            return group_states
 
     @final
     async def run_rollout(
@@ -860,6 +931,10 @@ class Environment(ABC):
         """
         from datasets import Dataset
         from tqdm import tqdm
+
+        generate_attrs = {"env_id": self.env_id, "model": model}
+        generate_t0 = time.monotonic()
+        last_completion_time: float | None = None
 
         pbar: tqdm | None = None
 
@@ -1074,6 +1149,12 @@ class Environment(ABC):
                 for coro in asyncio.as_completed(tasks.keys()):
                     result = await coro
 
+                    now = time.monotonic()
+                    if last_completion_time is not None:
+                        idle = now - last_completion_time
+                        record_histogram("idle_duration", idle, generate_attrs)
+                    last_completion_time = now
+
                     # normalize: independent_scoring returns RolloutOutput, group returns list[RolloutOutput]
                     new_outputs = [result] if independent_scoring else result
                     builder.add_outputs(new_outputs)
@@ -1117,6 +1198,9 @@ class Environment(ABC):
                         f"Saved final results to {results['metadata']['path_to_save']}"
                     )
 
+            record_histogram(
+                "generate_duration", time.monotonic() - generate_t0, generate_attrs
+            )
             return results
         finally:
             if pbar is not None:

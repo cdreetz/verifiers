@@ -6,6 +6,12 @@ from typing import final
 
 import verifiers as vf
 from verifiers.clients import Client
+from verifiers.telemetry import (
+    record_counter,
+    record_error,
+    record_histogram,
+    span,
+)
 from verifiers.types import (
     Messages,
     Response,
@@ -174,26 +180,40 @@ class MultiTurnEnv(vf.Environment):
         sampling_args: SamplingArgs | None = None,
     ) -> State:
         state = await self.init_state(input, client, model, sampling_args)
+        rollout_attrs = {"env_id": self.env_id, "model": model}
 
         async def rollout_loop() -> None:
             nonlocal state
             state["timing"].generation.start = time.time()
             state["timing"].setup.start = time.time()
+            setup_t0 = time.monotonic()
             try:
                 setup_state = await self.setup_state(state)
                 if setup_state is not None:
                     state = setup_state
             except vf.Error as e:
                 state["error"] = e
+                record_error("environment", e, rollout_attrs)
             finally:
                 state["timing"].setup.end = time.time()
+                record_histogram(
+                    "setup_duration", time.monotonic() - setup_t0, rollout_attrs
+                )
+
+            turn_num = 0
             while not await self.is_completed(state):
+                turn_num += 1
+                record_counter(
+                    "turn_count", attributes={**rollout_attrs, "turn": turn_num}
+                )
                 try:
                     timing = state["timing"]
                     start_time = time.time()
-                    prompt_messages = await self.get_prompt_messages(state)
+                    with span(
+                        "env_response", attributes={**rollout_attrs, "turn": turn_num}
+                    ):
+                        prompt_messages = await self.get_prompt_messages(state)
                     end_time = time.time()
-                    # First iteration has no preceding env_response; skip recording.
                     if state["trajectory"]:
                         timing.env.spans.append(
                             TimeSpan(start=start_time, end=end_time)
@@ -216,11 +236,15 @@ class MultiTurnEnv(vf.Environment):
                         state["is_truncated"] = True
                     else:
                         state["error"] = e
+                        record_error("environment", e, rollout_attrs)
 
         try:
             await asyncio.wait_for(rollout_loop(), timeout=self.timeout_seconds)
         except asyncio.TimeoutError:
             self.mark_timed_out(state)
+            record_error(
+                "environment", None, {**rollout_attrs, "error_type": "TimeoutError"}
+            )
         finally:
             await self._finalize_rollout(state)
         return state
