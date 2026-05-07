@@ -227,6 +227,12 @@ redundant-cast = "ignore"
 exclude = ["environments", "verifiers/v1/sketch.py"]
 
 [[tool.ty.overrides]]
+include = ["verifiers/telemetry.py"]
+
+[tool.ty.overrides.rules]
+unresolved-import = "ignore"
+
+[[tool.ty.overrides]]
 include = ["verifiers/envs/experimental/composable/tasksets/**"]
 
 [tool.ty.overrides.rules]

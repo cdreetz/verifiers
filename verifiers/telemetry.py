@@ -359,12 +359,16 @@ def timed(
     _init()
 
     otel_span = None
+    tok = None
+    _otel_context = None
+    _otel_trace = None
     if span_name and _tracer:
-        otel_span = _tracer.start_span(span_name, attributes=attrs)
-        # Activate the span in the current context.
         from opentelemetry import context as otel_context
         from opentelemetry import trace as otel_trace
 
+        _otel_context = otel_context
+        _otel_trace = otel_trace
+        otel_span = _tracer.start_span(span_name, attributes=attrs)
         tok = otel_context.attach(otel_trace.set_span_in_context(otel_span))
 
     try:
@@ -377,8 +381,8 @@ def timed(
                 error_counter_name,
                 attributes={**attrs, "error_type": type(exc).__name__},
             )
-        if otel_span is not None:
-            otel_span.set_status(otel_trace.StatusCode.ERROR, str(exc))
+        if otel_span is not None and _otel_trace is not None:
+            otel_span.set_status(_otel_trace.StatusCode.ERROR, str(exc))
             otel_span.record_exception(exc)
         raise
     finally:
@@ -395,7 +399,8 @@ def timed(
                 if isinstance(v, (str, int, float, bool)):
                     otel_span.set_attribute(f"vf.{k}", v)
             otel_span.end()
-            otel_context.detach(tok)  # type: ignore[possibly-undefined]
+        if tok is not None and _otel_context is not None:
+            _otel_context.detach(tok)
 
 
 def record_tokens(
