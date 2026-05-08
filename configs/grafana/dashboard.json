@@ -316,123 +316,6 @@
     {
       "collapsed": false,
       "gridPos": { "h": 1, "w": 24, "x": 0, "y": 44 },
-      "id": 104,
-      "title": "Browser Infrastructure",
-      "type": "row"
-    },
-    {
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-      "fieldConfig": {
-        "defaults": { "unit": "short" },
-        "overrides": []
-      },
-      "gridPos": { "h": 8, "w": 6, "x": 0, "y": 45 },
-      "id": 15,
-      "title": "Browser Sessions Created",
-      "type": "stat",
-      "targets": [
-        {
-          "expr": "vf_browser_session_created_total",
-          "legendFormat": "{{mode}}"
-        }
-      ]
-    },
-    {
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-      "fieldConfig": {
-        "defaults": { "unit": "short" },
-        "overrides": []
-      },
-      "gridPos": { "h": 8, "w": 6, "x": 6, "y": 45 },
-      "id": 16,
-      "title": "Active Browser Sessions",
-      "type": "gauge",
-      "targets": [
-        {
-          "expr": "vf_browser_session_active",
-          "legendFormat": "{{mode}}"
-        }
-      ]
-    },
-    {
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-      "fieldConfig": {
-        "defaults": { "unit": "short" },
-        "overrides": []
-      },
-      "gridPos": { "h": 8, "w": 6, "x": 12, "y": 45 },
-      "id": 17,
-      "title": "Browser Retries",
-      "type": "stat",
-      "targets": [
-        {
-          "expr": "vf_browser_retry_count_total",
-          "legendFormat": "{{operation}}"
-        }
-      ]
-    },
-    {
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-      "fieldConfig": {
-        "defaults": { "unit": "short" },
-        "overrides": []
-      },
-      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 45 },
-      "id": 18,
-      "title": "Sandbox Created / Deleted",
-      "type": "timeseries",
-      "targets": [
-        {
-          "expr": "rate(vf_sandbox_created_total[5m])",
-          "legendFormat": "created"
-        },
-        {
-          "expr": "rate(vf_sandbox_deleted_total[5m])",
-          "legendFormat": "deleted"
-        }
-      ]
-    },
-    {
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-      "fieldConfig": {
-        "defaults": { "unit": "s" },
-        "overrides": []
-      },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 53 },
-      "id": 19,
-      "title": "Browser Action Duration by Type",
-      "type": "timeseries",
-      "targets": [
-        {
-          "expr": "histogram_quantile(0.50, rate(vf_browser_action_duration_bucket[5m]))",
-          "legendFormat": "p50 {{action_type}}"
-        },
-        {
-          "expr": "histogram_quantile(0.95, rate(vf_browser_action_duration_bucket[5m]))",
-          "legendFormat": "p95 {{action_type}}"
-        }
-      ]
-    },
-    {
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-      "fieldConfig": {
-        "defaults": { "unit": "short" },
-        "overrides": []
-      },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 53 },
-      "id": 20,
-      "title": "Browser Action Count by Type",
-      "type": "timeseries",
-      "targets": [
-        {
-          "expr": "rate(vf_browser_action_count_total[1m]) * 60",
-          "legendFormat": "{{action_type}}"
-        }
-      ]
-    },
-    {
-      "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 61 },
       "id": 105,
       "title": "Tool Calls",
       "type": "row"
@@ -443,7 +326,7 @@
         "defaults": { "unit": "short" },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 62 },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 45 },
       "id": 21,
       "title": "Tool Call Rate by Tool",
       "type": "timeseries",
@@ -460,7 +343,7 @@
         "defaults": { "unit": "s" },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 62 },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 45 },
       "id": 22,
       "title": "Tool Call Duration by Tool",
       "type": "timeseries",
@@ -481,7 +364,7 @@
         "defaults": { "unit": "short" },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 62 },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 45 },
       "id": 23,
       "title": "Tool Call Errors",
       "type": "timeseries",
@@ -494,7 +377,7 @@
     },
     {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 70 },
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 53 },
       "id": 106,
       "title": "Errors & Debugging",
       "type": "row"
@@ -505,7 +388,7 @@
         "defaults": { "unit": "short" },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 71 },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 54 },
       "id": 24,
       "title": "Errors by Category",
       "type": "timeseries",
@@ -522,7 +405,7 @@
         "defaults": { "unit": "short" },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 71 },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 54 },
       "id": 25,
       "title": "Error Breakdown (pie)",
       "type": "piechart",
@@ -539,7 +422,7 @@
         "defaults": { "unit": "short" },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 79 },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 62 },
       "id": 26,
       "title": "Turns per Rollout",
       "type": "timeseries",
@@ -556,7 +439,7 @@
         "defaults": { "unit": "s" },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 79 },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 62 },
       "id": 27,
       "title": "Setup Duration",
       "type": "timeseries",

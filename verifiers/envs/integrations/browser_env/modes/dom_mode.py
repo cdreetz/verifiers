@@ -7,7 +7,6 @@ from typing import Any, cast
 
 from dotenv import load_dotenv
 import verifiers as vf
-from verifiers.telemetry import record_counter, record_error, record_up_down
 from stagehand import AsyncStagehand
 from stagehand.session import AsyncSession
 
@@ -105,8 +104,6 @@ class DOMMode:
         session = await self._create_session(state)
         state["stagehand_session"] = session
         state["stagehand_session_id"] = session.id
-        record_counter("browser_session_created", attributes={"mode": "dom"})
-        record_up_down("browser_session_active", 1, {"mode": "dom"})
 
     def _get_llm_config(self, state: vf.State) -> dict[str, Any] | None:
         """Extract model configuration from verifiers state to route LLM calls."""
@@ -155,10 +152,7 @@ class DOMMode:
         if session is not None:
             try:
                 await session.end()
-                record_counter("browser_session_destroyed", attributes={"mode": "dom"})
-                record_up_down("browser_session_active", -1, {"mode": "dom"})
             except Exception as e:
-                record_error("browser", e, {"mode": "dom", "operation": "cleanup"})
                 if self.logger:
                     self.logger.warning(f"Error ending session: {e}")
 

@@ -197,49 +197,6 @@ def _init() -> None:  # noqa: C901 – one-time setup, complexity is fine
         description="Number of model request errors",
     )
 
-    # -- Browser --
-    _instruments["browser_session_created"] = _meter.create_counter(
-        "vf.browser.session.created",
-        description="Browser sessions created",
-    )
-    _instruments["browser_session_destroyed"] = _meter.create_counter(
-        "vf.browser.session.destroyed",
-        description="Browser sessions destroyed",
-    )
-    _instruments["browser_session_active"] = _meter.create_up_down_counter(
-        "vf.browser.session.active",
-        description="Currently active browser sessions",
-    )
-    _instruments["browser_action_count"] = _meter.create_counter(
-        "vf.browser.action.count",
-        description="Browser actions executed",
-    )
-    _instruments["browser_action_duration"] = _meter.create_histogram(
-        "vf.browser.action.duration",
-        unit="s",
-        description="Browser action duration in seconds",
-    )
-    _instruments["browser_action_error"] = _meter.create_counter(
-        "vf.browser.action.error",
-        description="Browser action errors",
-    )
-    _instruments["browser_retry_count"] = _meter.create_counter(
-        "vf.browser.retry.count",
-        description="Browser operation retries",
-    )
-    _instruments["sandbox_created"] = _meter.create_counter(
-        "vf.sandbox.created",
-        description="Sandboxes created",
-    )
-    _instruments["sandbox_deleted"] = _meter.create_counter(
-        "vf.sandbox.deleted",
-        description="Sandboxes deleted",
-    )
-    _instruments["sandbox_error"] = _meter.create_counter(
-        "vf.sandbox.error",
-        description="Sandbox errors",
-    )
-
     # -- Tool calls --
     _instruments["tool_call_count"] = _meter.create_counter(
         "vf.tool.call.count",
