@@ -96,6 +96,11 @@ browser = [
 renderers = [
     "renderers>=0.1.6",
 ]
+telemetry = [
+    "opentelemetry-api>=1.20.0",
+    "opentelemetry-sdk>=1.20.0",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.20.0",
+]
 rl = [
     "torch>=2.8.0,<2.9.0",
     "transformers>=4.56.2",
@@ -220,6 +225,12 @@ redundant-cast = "ignore"
 
 [tool.ty.src]
 exclude = ["environments", "verifiers/v1/sketch.py"]
+
+[[tool.ty.overrides]]
+include = ["verifiers/telemetry.py"]
+
+[tool.ty.overrides.rules]
+unresolved-import = "ignore"
 
 [[tool.ty.overrides]]
 include = ["verifiers/envs/experimental/composable/tasksets/**"]

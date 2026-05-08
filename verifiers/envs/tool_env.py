@@ -2,6 +2,7 @@ import json
 from typing import Callable, cast
 
 import verifiers as vf
+from verifiers.telemetry import record_error, timed
 from verifiers.types import AssistantMessage, Messages, ToolCall, ToolMessage
 from verifiers.utils.async_utils import maybe_await
 from verifiers.utils.tool_utils import (
@@ -133,14 +134,22 @@ class ToolEnv(vf.MultiTurnEnv):
         self, tool_name: str, tool_args: dict, tool_call_id: str, **kwargs
     ) -> ToolMessage:
         """Call a tool based on JSON command."""
-        tool_func = self.tool_map[tool_name]
-        result = await maybe_await(tool_func, **tool_args)
-        content = result if is_valid_tool_content_parts(result) else str(result)
-        return ToolMessage(
-            role="tool",
-            content=content,
-            tool_call_id=tool_call_id,
-        )
+        attrs = {"tool_name": tool_name}
+        with timed(
+            "tool_call_duration",
+            counter_name="tool_call_count",
+            error_counter_name="tool_call_error",
+            span_name="tool_call",
+            attributes=attrs,
+        ):
+            tool_func = self.tool_map[tool_name]
+            result = await maybe_await(tool_func, **tool_args)
+            content = result if is_valid_tool_content_parts(result) else str(result)
+            return ToolMessage(
+                role="tool",
+                content=content,
+                tool_call_id=tool_call_id,
+            )
 
     async def env_response(
         self, messages: vf.Messages, state: vf.State, **kwargs
@@ -154,6 +163,7 @@ class ToolEnv(vf.MultiTurnEnv):
                 tool_name: str = tool_call.name
                 tool_args: dict = json.loads(tool_call.arguments)
             except Exception as e:
+                record_error("tool_parse", e, {"tool_call_id": tool_call_id})
                 if self._should_stop_for_error(e):
                     raise vf.ToolParseError from e
                 tool_messages.append(
@@ -169,6 +179,7 @@ class ToolEnv(vf.MultiTurnEnv):
                 tool_message = await self.call_tool(tool_name, tool_args, tool_call_id)
                 tool_messages.append(tool_message)
             except Exception as e:
+                record_error("tool_call", e, {"tool_name": tool_name})
                 if self._should_stop_for_error(e):
                     raise vf.ToolCallError from e
                 tool_messages.append(
