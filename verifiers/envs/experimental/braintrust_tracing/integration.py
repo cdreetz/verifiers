@@ -221,9 +221,22 @@ def _patch_environment() -> None:
         )
         return group_states
 
+    _orig_generate = Environment.generate
+
+    async def _traced_generate(self: Any, *args: Any, **kwargs: Any) -> Any:
+        if _bt.enabled():
+            run_tags = _bt.set_run_tags()
+            if run_tags:
+                _log.info("Braintrust run tag: %s", run_tags[0])
+        try:
+            return await _orig_generate(self, *args, **kwargs)
+        finally:
+            _bt.clear_run_tags()
+
     Environment.get_model_response = _traced_get_model_response  # type: ignore[assignment]
     Environment._run_rollout_state = _traced_run_rollout_state  # type: ignore[assignment]
     Environment._run_group_states = _traced_run_group_states  # type: ignore[assignment]
+    Environment.generate = _traced_generate  # type: ignore[assignment]
     _mark_patched(Environment)
 
 
