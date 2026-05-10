@@ -36,7 +36,7 @@ import logging
 import time
 from typing import Any
 
-import verifiers.envs.experimental.braintrust_tracing.braintrust_tracing as _bt
+import verifiers.v1.experimental.braintrust_tracing.braintrust_tracing as _bt
 
 _log = logging.getLogger(__name__)
 
