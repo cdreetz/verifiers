@@ -48,13 +48,6 @@ _log = logging.getLogger(__name__)
 _INSTANCE: _Tracing | None = None
 _LOCK = threading.Lock()
 
-# Coroutine-local storage for passing the rollout span from
-# _run_rollout_state → rollout() across the await boundary without
-# storing mutable state on the shared Environment instance.
-_pending_rollout_span: contextvars.ContextVar[Any] = contextvars.ContextVar(
-    "_pending_rollout_span", default=None
-)
-
 # Run-level tags: coroutine-local storage so concurrent generate() calls
 # each get their own tag set without overwriting each other.
 _run_tags: contextvars.ContextVar[list[str]] = contextvars.ContextVar(
