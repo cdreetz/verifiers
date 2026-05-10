@@ -667,7 +667,7 @@ class _Tracing:
             return
 
         try:
-            import braintrust
+            import braintrust  # ty: ignore[unresolved-import]
 
             self._logger = braintrust.init_logger(
                 project=self._project,
