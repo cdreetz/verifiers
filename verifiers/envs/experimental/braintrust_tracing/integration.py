@@ -225,7 +225,8 @@ def _patch_environment() -> None:
 
     async def _traced_generate(self: Any, *args: Any, **kwargs: Any) -> Any:
         if _bt.enabled():
-            run_tags = _bt.set_run_tags()
+            # Preserve user-provided tags; only auto-generate when none are set.
+            run_tags = _bt.get_run_tags() or _bt.set_run_tags()
             if run_tags:
                 _log.info("Braintrust run tag: %s", run_tags[0])
         try:
