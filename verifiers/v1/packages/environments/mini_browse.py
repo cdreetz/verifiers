@@ -268,8 +268,15 @@ def _record_verdict(state: dict[str, Any] | None, verdict: str, reasoning: str) 
 
 async def _tool_exec(
     tool_name: str, args: dict[str, Any], state: dict[str, Any]
-) -> str:
-    """Run a mini-browse-runtime tool, collect images/reminders into state."""
+) -> str | list[dict[str, Any]]:
+    """Run a mini-browse-runtime tool, return multipart content when images exist.
+
+    Returns a list of content-part dicts (text + image_url) when the tool
+    produces screenshots or system reminders.  The v1 ``base_program`` loop
+    checks ``is_valid_tool_content_parts(result)`` and forwards the list
+    directly as the ``ToolMessage`` content, so the model sees the images.
+    Falls back to a plain JSON string when there are no images.
+    """
     from mini_browse_runtime.runtime import (  # type: ignore[import-not-found]
         MiniBrowseContext,
         execute_tool,
@@ -298,11 +305,13 @@ async def _tool_exec(
                 "Use the attached screenshot(s) as the latest browser "
                 f"state. Tagged: {tags}."
             )
-        followup_parts: list[dict[str, Any]] = [
+        # Include the JSON payload as text so the model still sees it.
+        text_lines.append(json.dumps(result.payload, ensure_ascii=False))
+        content_parts: list[dict[str, Any]] = [
             {"type": "text", "text": "\n\n".join(text_lines)}
         ]
         for image in result.images:
-            followup_parts.append(
+            content_parts.append(
                 {
                     "type": "image_url",
                     "image_url": {
@@ -310,7 +319,7 @@ async def _tool_exec(
                     },
                 }
             )
-        state.setdefault("_mb_pending_followups", []).append(followup_parts)
+        return content_parts
 
     return json.dumps(result.payload, ensure_ascii=False)
 
@@ -321,7 +330,7 @@ async def navigate(
     tab_id: int | None = None,
     *,
     state: dict[str, Any],
-) -> str:
+) -> str | list[dict[str, Any]]:
     """Navigate the current tab to a URL, or use 'forward'/'back' for history."""
     return await _tool_exec(
         "navigate",
@@ -337,7 +346,7 @@ async def computer(
     save_to_workspace: bool = False,
     *,
     state: dict[str, Any],
-) -> str:
+) -> str | list[dict[str, Any]]:
     """Execute a batched sequence of low-level browser actions."""
     return await _tool_exec(
         "computer",
@@ -359,7 +368,7 @@ async def read_page(
     tab_id: int | None = None,
     *,
     state: dict[str, Any],
-) -> str:
+) -> str | list[dict[str, Any]]:
     """Accessibility-tree view. filter: 'interactive'|'all'|'viewport'."""
     return await _tool_exec(
         "read_page",
@@ -381,7 +390,7 @@ async def form_input(
     tab_id: int | None = None,
     *,
     state: dict[str, Any],
-) -> str:
+) -> str | list[dict[str, Any]]:
     """Set a form field using a ref_id from read_page."""
     return await _tool_exec(
         "form_input",
@@ -400,7 +409,7 @@ async def get_page_text(
     tab_id: int | None = None,
     *,
     state: dict[str, Any],
-) -> str:
+) -> str | list[dict[str, Any]]:
     """Get the current page's visible text."""
     return await _tool_exec(
         "get_page_text",
@@ -415,7 +424,7 @@ async def find(
     tab_id: int | None = None,
     *,
     state: dict[str, Any],
-) -> str:
+) -> str | list[dict[str, Any]]:
     """Keyword-rank elements matching a natural-language query."""
     return await _tool_exec(
         "find",
@@ -424,7 +433,7 @@ async def find(
     )
 
 
-async def tabs_context(*, state: dict[str, Any]) -> str:
+async def tabs_context(*, state: dict[str, Any]) -> str | list[dict[str, Any]]:
     """List current tabs."""
     return await _tool_exec("tabs_context", {}, state)
 
@@ -434,7 +443,7 @@ async def tabs_create(
     user_description: str = "",
     *,
     state: dict[str, Any],
-) -> str:
+) -> str | list[dict[str, Any]]:
     """Open a new tab, optionally at a URL."""
     return await _tool_exec(
         "tabs_create",
@@ -449,7 +458,7 @@ async def wait_for_download(
     timeout: int = 30,
     *,
     state: dict[str, Any],
-) -> str:
+) -> str | list[dict[str, Any]]:
     """Wait for a file download to finish."""
     return await _tool_exec(
         "wait_for_download",
@@ -682,7 +691,6 @@ def build_browse_toolset(
         state.pop("_mb_browser", None)
         state.pop("_mb_workspace", None)
         state.pop("_mb_ctx", None)
-        state.pop("_mb_pending_followups", None)
 
     return v1.Toolset(
         tools=[
