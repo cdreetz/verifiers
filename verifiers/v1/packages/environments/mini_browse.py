@@ -575,7 +575,7 @@ def build_browse_toolset(
                     "Browser was never initialized; no screenshot exists."
                 ),
             }
-            state.stop("setup_failed")
+            state.stop("setup_failed")  # type: ignore[union-attr]
             return
 
         elapsed = time.monotonic() - state["_mb_browser_create_started_at"]
@@ -621,6 +621,7 @@ def build_browse_toolset(
         state["_mb_task_text"] = task_text
 
         tab_ctx_json = json.dumps({"tab_context": tab_context}, ensure_ascii=False)
+        screenshot_id: int | None = None
         if screenshot_bytes is not None:
             screenshot_id = _next_screenshot_id(state)
             screenshot_line = (
@@ -629,7 +630,6 @@ def build_browse_toolset(
                 f"tagged [screenshot_{screenshot_id}]."
             )
         else:
-            screenshot_id = None
             screenshot_line = "Screenshot of the current tab was unavailable."
 
         text = (
@@ -642,7 +642,7 @@ def build_browse_toolset(
             text = f"[SYSTEM: {nav_error}]\n\n{text}"
 
         user_content: list[dict[str, Any]] = [{"type": "text", "text": text}]
-        if screenshot_bytes is not None:
+        if screenshot_bytes is not None and screenshot_id is not None:
             encoded = base64.b64encode(screenshot_bytes).decode("ascii")
             _archive_screenshot(state, screenshot_id, encoded, SCREENSHOT_MEDIA_TYPE)
             user_content.append(
@@ -814,20 +814,32 @@ def build_judge_reward(
     """Build a weight-1 reward function that calls a vision LLM judge."""
     judge_provider = "anthropic" if "claude" in judge_model.lower() else "openai"
 
-    if judge_provider == "anthropic":
-        from anthropic import AsyncAnthropic  # type: ignore[import-unresolved]
+    api_key = os.environ[judge_api_key_var]
 
-        kwargs: dict[str, Any] = {"api_key": os.environ[judge_api_key_var]}
-        if judge_base_url:
-            kwargs["base_url"] = judge_base_url
-        judge_client: Any = AsyncAnthropic(**kwargs)
+    anthropic_client: Any = None
+    openai_client: Any = None
+    if judge_provider == "anthropic":
+        from anthropic import AsyncAnthropic
+
+        anthropic_client = (
+            AsyncAnthropic(
+                api_key=api_key,
+                base_url=judge_base_url,
+            )
+            if judge_base_url
+            else AsyncAnthropic(api_key=api_key)
+        )
     else:
         from openai import AsyncOpenAI
 
-        kwargs = {"api_key": os.environ[judge_api_key_var]}
-        if judge_base_url:
-            kwargs["base_url"] = judge_base_url
-        judge_client = AsyncOpenAI(**kwargs)
+        openai_client = (
+            AsyncOpenAI(
+                api_key=api_key,
+                base_url=judge_base_url,
+            )
+            if judge_base_url
+            else AsyncOpenAI(api_key=api_key)
+        )
 
     @reward(weight=1.0)
     async def judge_reward_func(task: dict[str, Any], state: dict[str, Any]) -> float:
@@ -861,12 +873,12 @@ def build_judge_reward(
         )
 
         try:
-            if judge_provider == "anthropic":
-                response = await judge_client.messages.create(
+            if anthropic_client is not None:
+                response = await anthropic_client.messages.create(
                     model=judge_model,
                     max_tokens=judge_max_tokens,
                     system=JUDGE_PROMPT,
-                    tools=[_VERDICT_TOOL],
+                    tools=[_VERDICT_TOOL],  # type: ignore[arg-type]
                     tool_choice={
                         "type": "tool",
                         "name": "submit_verdict",
@@ -905,9 +917,9 @@ def build_judge_reward(
                         f"stop_reason={response.stop_reason}",
                     )
                     return 0.0
-            else:
+            elif openai_client is not None:
                 data_url = f"data:{image['media_type']};base64,{image['data']}"
-                response = await judge_client.chat.completions.create(
+                response = await openai_client.chat.completions.create(
                     model=judge_model,
                     messages=[
                         {"role": "system", "content": JUDGE_PROMPT},
@@ -1124,7 +1136,7 @@ def load_environment(
     # Optionally enable Braintrust v1 tracing.
     if enable_braintrust_tracing:
         try:
-            from verifiers.v1.experimental.braintrust_tracing import (
+            from verifiers.v1.experimental.braintrust_tracing import (  # type: ignore[import-not-found]
                 setup_v1_tracing,
             )
 
