@@ -734,7 +734,7 @@ def _build_smoke_rows() -> list[dict[str, Any]]:
         {
             "prompt": [{"role": "user", "content": task["description"]}],
             "answer": "",
-            "task": task["task_id"],
+            "task_id": task["task_id"],
             "info": {"url": task["url"]},
         }
         for task in SMOKE_TASKS
@@ -773,7 +773,7 @@ def _build_webvoyager_rows(
                 {
                     "prompt": [{"role": "user", "content": question}],
                     "answer": "",
-                    "task": item["id"],
+                    "task_id": item["id"],
                     "info": {"url": item["web"], "website": item["web_name"]},
                 }
             )
@@ -811,7 +811,7 @@ def _build_flights_no_year_rows(
                 {
                     "prompt": [{"role": "user", "content": question}],
                     "answer": "",
-                    "task": item["id"],
+                    "task_id": item["id"],
                     "info": {"url": item["web"], "website": item["web_name"]},
                 }
             )
