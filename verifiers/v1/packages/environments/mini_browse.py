@@ -131,6 +131,11 @@ JUDGE_PROMPT = (
     'or "no", and write 2-4 sentences in `verdict_reasoning`.'
 )
 
+_JUDGE_PROMPT_OPENAI_SUFFIX = (
+    " Respond with a JSON object containing two keys: "
+    '`verdict` ("yes" or "no") and `verdict_reasoning` (2-4 sentences).'
+)
+
 _VERDICT_TOOL: dict[str, Any] = {
     "name": "submit_verdict",
     "description": (
@@ -934,10 +939,11 @@ def build_judge_reward(
                     return 0.0
             elif openai_client is not None:
                 data_url = f"data:{image['media_type']};base64,{image['data']}"
+                openai_judge_prompt = JUDGE_PROMPT + _JUDGE_PROMPT_OPENAI_SUFFIX
                 response = await openai_client.chat.completions.create(
                     model=judge_model,
                     messages=[
-                        {"role": "system", "content": JUDGE_PROMPT},
+                        {"role": "system", "content": openai_judge_prompt},
                         {
                             "role": "user",
                             "content": [
@@ -1159,9 +1165,14 @@ def load_environment(
         else:
             setup_v1_tracing()
 
-    if output_schema is None:
-        import verifiers as vf
+    import verifiers as vf
 
+    if backend == "browserbase":
+        vf.ensure_keys(["BROWSERBASE_API_KEY", "BROWSERBASE_PROJECT_ID"])
+    elif backend == "perplexity":
+        vf.ensure_keys(["MINI_BROWSE_BROWSER_API_URL"])
+
+    if output_schema is None:
         vf.ensure_keys([judge_api_key_var])
 
     # ---- Dataset rows ----
