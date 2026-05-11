@@ -688,8 +688,15 @@ def build_browse_toolset(
                 await browser.close()
             except Exception:
                 logger.exception("mini_browse_v1.browser_close_failed")
+        import shutil
+
         state.pop("_mb_browser", None)
-        state.pop("_mb_workspace", None)
+        workspace = state.pop("_mb_workspace", None)
+        if workspace is not None:
+            try:
+                shutil.rmtree(workspace, ignore_errors=True)
+            except Exception:
+                pass
         state.pop("_mb_ctx", None)
 
     return v1.Toolset(
@@ -1147,10 +1154,10 @@ def load_environment(
             from verifiers.v1.experimental.braintrust_tracing import (  # type: ignore[import-not-found]
                 setup_v1_tracing,
             )
-
-            setup_v1_tracing()
-        except Exception:
+        except ImportError:
             logger.debug("Braintrust v1 tracing not available; skipping.")
+        else:
+            setup_v1_tracing()
 
     if output_schema is None:
         import verifiers as vf
