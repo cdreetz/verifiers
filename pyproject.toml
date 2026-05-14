@@ -121,6 +121,10 @@ conflicts = [
         { extra = "openenv" },
         { group = "policy" },
     ],
+    [
+        { extra = "nemogym" },
+        { extra = "openenv" },
+    ],
 ]
 [[tool.uv.index]]
 name = "pypi"
