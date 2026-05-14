@@ -68,6 +68,7 @@ __all__ = [
     "MCPEnv",
     "BrowserEnv",
     "OpenEnvEnv",
+    "NemoGymTaskset",
     "Env",
     "EnvConfig",
     "Task",
