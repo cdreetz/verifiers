@@ -15,8 +15,6 @@ Usage::
     env = vf.Env(taskset=taskset)
 """
 
-from __future__ import annotations
-
 import inspect
 import json
 import logging
@@ -323,8 +321,8 @@ def _make_jsonl_tool_callable(
         return tool_fn
 
     fn = _make_fn()
-    fn.__name__ = name
-    fn.__qualname__ = name
+    fn.__name__ = name  # type: ignore[attr-defined]
+    fn.__qualname__ = name  # type: ignore[attr-defined]
 
     params_schema = tool_def.get("parameters", {})
     properties = params_schema.get("properties", {})
