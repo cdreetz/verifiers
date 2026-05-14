@@ -280,6 +280,7 @@ if TYPE_CHECKING:
     from .envs.experimental.harbor_env import HarborEnv  # noqa: F401
     from .envs.experimental.mcp_env import MCPEnv  # noqa: F401
     from .envs.integrations.browser_env import BrowserEnv  # noqa: F401
+    from .envs.integrations.nemogym_env import NemoGymTaskset  # noqa: F401
     from .envs.integrations.openenv_env import OpenEnvEnv  # noqa: F401
     from .envs.integrations.reasoninggym_env import ReasoningGymEnv  # noqa: F401
     from .envs.integrations.textarena_env import TextArenaEnv  # noqa: F401
