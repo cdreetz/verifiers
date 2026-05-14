@@ -94,6 +94,9 @@ browser = [
 openenv = [
     "openenv-core>=0.3.0",
 ]
+nemogym = [
+    "nemo-gym",
+]
 renderers = [
     "renderers>=0.1.8.dev0",
 ]

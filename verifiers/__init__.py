@@ -186,6 +186,7 @@ _LAZY_IMPORTS = {
     "TextArenaEnv": "verifiers.envs.integrations.textarena_env:TextArenaEnv",
     "BrowserEnv": "verifiers.envs.integrations.browser_env:BrowserEnv",
     "OpenEnvEnv": "verifiers.envs.integrations.openenv_env:OpenEnvEnv",
+    "NemoGymTaskset": "verifiers.envs.integrations.nemogym_env:NemoGymTaskset",
     "Config": "verifiers.v1:Config",
     "Env": "verifiers.v1:Env",
     "EnvConfig": "verifiers.v1:EnvConfig",
