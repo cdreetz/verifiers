@@ -1,7 +1,8 @@
 """NeMo Gym integration for Verifiers.
 
-Wraps any NeMo Gym resources server (SimpleResourcesServer or GymnasiumServer)
-as a v1 ``vf.Taskset`` that can be used with ``vf.Env``.
+Wraps any NeMo Gym server (SimpleResourcesServer, GymnasiumServer, or
+SimpleResponsesAPIAgent) as a v1 ``vf.Taskset`` that can be used with
+``vf.Env``.
 
 Usage::
 
@@ -47,6 +48,7 @@ except ImportError as e:
     ) from e
 
 _GYMNASIUM_SERVER_CLS: type | None = None
+_RESPONSES_API_AGENT_CLS: type | None = None
 
 _STANDARD_ROUTES = frozenset(
     {
@@ -55,6 +57,8 @@ _STANDARD_ROUTES = frozenset(
         "/aggregate_metrics",
         "/reset",
         "/step",
+        "/run",
+        "/v1/responses",
         "/openapi.json",
         "/docs",
         "/redoc",
@@ -80,6 +84,26 @@ def _is_gymnasium_server(server_cls: type) -> bool:
     if gym_cls is None:
         return False
     return issubclass(server_cls, gym_cls)
+
+
+def _get_responses_api_agent_cls() -> type | None:
+    global _RESPONSES_API_AGENT_CLS
+    if _RESPONSES_API_AGENT_CLS is not None:
+        return _RESPONSES_API_AGENT_CLS
+    try:
+        from nemo_gym.base_responses_api_agent import SimpleResponsesAPIAgent
+
+        _RESPONSES_API_AGENT_CLS = SimpleResponsesAPIAgent
+        return SimpleResponsesAPIAgent
+    except ImportError:
+        return None
+
+
+def _is_responses_api_agent(server_cls: type) -> bool:
+    agent_cls = _get_responses_api_agent_cls()
+    if agent_cls is None:
+        return False
+    return issubclass(server_cls, agent_cls)
 
 
 def _discover_tool_routes(app: object) -> list[str]:
@@ -226,7 +250,6 @@ def _jsonl_to_task_rows(
     for i, row in enumerate(rows):
         rcp = row.get("responses_create_params", {})
         messages = rcp.get("input", [])
-        system_prompt = _extract_system_prompt(messages)
         user_messages = _extract_user_messages(messages)
         prompt = [
             {"role": m.get("role", "user"), "content": m.get("content", "")}
@@ -253,10 +276,53 @@ def _jsonl_to_task_rows(
             "example_id": i,
             "info": json.dumps(info),
         }
-        if system_prompt:
-            task_row["system_prompt"] = system_prompt
         if "answer" in row:
             task_row["answer"] = str(row["answer"])
+        task_rows.append(task_row)
+    return task_rows
+
+
+def _agent_jsonl_to_task_rows(
+    rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Convert agent-style JSONL rows to verifiers task rows.
+
+    Agent JSONL may not contain ``responses_create_params.input``.
+    The agent's ``/run`` endpoint handles prompt construction internally.
+    """
+    task_rows: list[dict[str, Any]] = []
+    for i, row in enumerate(rows):
+        rcp = row.get("responses_create_params", {})
+        messages = rcp.get("input", [])
+        user_messages = _extract_user_messages(messages) if messages else []
+
+        if user_messages:
+            prompt = [
+                {"role": m.get("role", "user"), "content": m.get("content", "")}
+                for m in user_messages
+            ]
+        else:
+            desc_parts: list[str] = []
+            for key in ("instance_id", "question", "task", "problem_statement"):
+                if key in row:
+                    desc_parts.append(str(row[key]))
+            prompt = [
+                {
+                    "role": "user",
+                    "content": " ".join(desc_parts) if desc_parts else f"Task {i}",
+                }
+            ]
+
+        info: dict[str, Any] = {"nemogym_row_index": i, "is_agent": True}
+        info["raw_row"] = row
+        if rcp:
+            info["responses_create_params"] = rcp
+
+        task_row: dict[str, Any] = {
+            "prompt": prompt,
+            "example_id": i,
+            "info": json.dumps(info),
+        }
         task_rows.append(task_row)
     return task_rows
 
@@ -394,13 +460,15 @@ def _make_jsonl_tool_callable(
 
 
 class NemoGymTaskset(Taskset):
-    """V1 Taskset wrapping any NeMo Gym resources server.
+    """V1 Taskset wrapping any NeMo Gym server.
 
-    Auto-detects the server type (SimpleResourcesServer vs GymnasiumServer)
-    and configures tools, rewards, and multi-turn handlers accordingly.
+    Auto-detects the server type (SimpleResourcesServer, GymnasiumServer,
+    or SimpleResponsesAPIAgent) and configures tools, rewards, and
+    multi-turn handlers accordingly.
 
     Args:
-        server_cls: The NeMo Gym server class (e.g. ``BlackjackEnv``).
+        server_cls: The NeMo Gym server class (e.g. ``BlackjackEnv``,
+            ``MiniSWEAgent``).
         data_path: Path to the NeMo Gym JSONL data file.
         server_config: Optional dict of server config overrides.
         max_steps: Maximum steps for gymnasium environments (default 50).
@@ -419,18 +487,25 @@ class NemoGymTaskset(Taskset):
         self._server_config = server_config
         self._max_steps = max_steps
         self._is_gymnasium = _is_gymnasium_server(server_cls)
+        self._is_agent = _is_responses_api_agent(server_cls)
 
         self._server = _make_server(server_cls, server_config)
         self._app = self._server.setup_webserver()
 
         raw_rows = _load_jsonl(self._data_path)
-        task_rows = _jsonl_to_task_rows(raw_rows)
+        if self._is_agent:
+            task_rows = _agent_jsonl_to_task_rows(raw_rows)
+        else:
+            task_rows = _jsonl_to_task_rows(raw_rows)
         self._raw_rows = raw_rows
         self._task_rows = task_rows
 
         system_prompt = None
-        if task_rows:
-            system_prompt = task_rows[0].get("system_prompt")
+        if raw_rows:
+            rcp = raw_rows[0].get("responses_create_params", {})
+            messages = rcp.get("input", [])
+            if messages:
+                system_prompt = _extract_system_prompt(messages)
 
         rewards: list[Any] = []
         toolsets: list[Any] = []
@@ -438,7 +513,9 @@ class NemoGymTaskset(Taskset):
         stops: list[Any] = []
         cleanups: list[Any] = []
 
-        if self._is_gymnasium:
+        if self._is_agent:
+            rewards.append(self._agent_reward)
+        elif self._is_gymnasium:
             rewards.append(self._gymnasium_reward)
             setups.append(self._gymnasium_setup)
             stops.append(self._gymnasium_stop)
@@ -569,6 +646,44 @@ class NemoGymTaskset(Taskset):
                 return float(result.get("reward", 0.0))
             logger.warning(
                 "verify returned status %d: %s",
+                resp.status_code,
+                resp.text[:200],
+            )
+            return 0.0
+
+    # -- Agent reward --
+
+    async def _agent_reward(self, task: Any, state: Any) -> float:
+        completion = state.get("completion", [])
+        if not completion:
+            return 0.0
+
+        info_str = task.get("info")
+        info = json.loads(info_str) if isinstance(info_str, str) else (info_str or {})
+        raw_row = info.get("raw_row", {})
+        rcp = info.get("responses_create_params", {})
+
+        if not rcp:
+            rcp = {"input": [{"role": "user", "content": ""}]}
+        rcp_obj = NeMoGymResponseCreateParamsNonStreaming(**rcp)
+
+        run_body: dict[str, Any] = {
+            "responses_create_params": rcp_obj.model_dump(),
+        }
+        for k, v in raw_row.items():
+            if k != "responses_create_params":
+                run_body[k] = v
+
+        transport = ASGITransport(app=self._app)  # type: ignore[arg-type]
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://nemogym"
+        ) as client:
+            resp = await client.post("/run", json=run_body)
+            if resp.status_code == 200:
+                result = resp.json()
+                return float(result.get("reward", 0.0))
+            logger.warning(
+                "agent /run returned status %d: %s",
                 resp.status_code,
                 resp.text[:200],
             )
