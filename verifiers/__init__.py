@@ -68,6 +68,7 @@ __all__ = [
     "MCPEnv",
     "BrowserEnv",
     "OpenEnvEnv",
+    "NemoGymTaskset",
     "Env",
     "EnvConfig",
     "Task",
@@ -186,6 +187,7 @@ _LAZY_IMPORTS = {
     "TextArenaEnv": "verifiers.envs.integrations.textarena_env:TextArenaEnv",
     "BrowserEnv": "verifiers.envs.integrations.browser_env:BrowserEnv",
     "OpenEnvEnv": "verifiers.envs.integrations.openenv_env:OpenEnvEnv",
+    "NemoGymTaskset": "verifiers.envs.integrations.nemogym_env:NemoGymTaskset",
     "Config": "verifiers.v1:Config",
     "Env": "verifiers.v1:Env",
     "EnvConfig": "verifiers.v1:EnvConfig",
@@ -255,6 +257,10 @@ def __getattr__(name: str):
             raise AttributeError(
                 "To use verifiers.RendererClient, install as `verifiers[renderers]`."
             ) from e
+        if name == "NemoGymTaskset":
+            raise AttributeError(
+                "To use verifiers.NemoGymTaskset, install as `verifiers[nemogym]`."
+            ) from e
         raise AttributeError(
             f"To use verifiers.{name}, install as `verifiers[all]`. "
         ) from e
@@ -278,6 +284,7 @@ if TYPE_CHECKING:
     from .envs.experimental.harbor_env import HarborEnv  # noqa: F401
     from .envs.experimental.mcp_env import MCPEnv  # noqa: F401
     from .envs.integrations.browser_env import BrowserEnv  # noqa: F401
+    from .envs.integrations.nemogym_env import NemoGymTaskset  # noqa: F401
     from .envs.integrations.openenv_env import OpenEnvEnv  # noqa: F401
     from .envs.integrations.reasoninggym_env import ReasoningGymEnv  # noqa: F401
     from .envs.integrations.textarena_env import TextArenaEnv  # noqa: F401

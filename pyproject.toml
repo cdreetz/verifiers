@@ -94,6 +94,9 @@ browser = [
 openenv = [
     "openenv-core>=0.3.0",
 ]
+nemogym = [
+    "nemo-gym; python_version >= '3.12'",
+]
 renderers = [
     "renderers>=0.1.8.dev0",
 ]
@@ -117,6 +120,10 @@ conflicts = [
     [
         { extra = "openenv" },
         { group = "policy" },
+    ],
+    [
+        { extra = "nemogym" },
+        { extra = "openenv" },
     ],
 ]
 [[tool.uv.index]]
@@ -234,6 +241,13 @@ unresolved-import = "ignore"
 invalid-method-override = "ignore"
 invalid-assignment = "ignore"
 not-iterable = "ignore"
+
+[[tool.ty.overrides]]
+include = ["verifiers/envs/integrations/nemogym_env.py"]
+
+[tool.ty.overrides.rules]
+unresolved-import = "ignore"
+unresolved-attribute = "ignore"
 
 [tool.coverage.run]
 source = ["verifiers"]

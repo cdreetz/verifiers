@@ -34,12 +34,14 @@ Third-party library wrappers that require additional dependencies:
 | `TextArenaEnv` | `ta` | `uv add 'verifiers[ta]'` |
 | `ReasoningGymEnv` | `rg` | `uv add 'verifiers[rg]'` |
 | `BrowserEnv` | `browser` | `uv add 'verifiers[browser]'` |
+| `NemoGymTaskset` | `nemogym` | `uv add 'verifiers[nemogym]'` |
 
 When developing in the `verifiers` repo:
 ```bash
 uv sync --extra ta       # for TextArenaEnv
 uv sync --extra rg       # for ReasoningGymEnv
 uv sync --extra browser  # for BrowserEnv
+uv sync --extra nemogym  # for NemoGymTaskset
 ```
 
 ### TextArenaEnv
