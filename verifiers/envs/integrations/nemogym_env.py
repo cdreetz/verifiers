@@ -178,7 +178,10 @@ def _default_for_annotation(ann: type | None) -> Any:
         return args[0] if args else ""
     if hasattr(ann, "model_fields"):
         return _build_pydantic_stub(ann)
-    return MagicMock()
+    raise TypeError(
+        f"Cannot produce a default for config field with annotation {ann!r}. "
+        "Pass an explicit value via server_config."
+    )
 
 
 def _build_pydantic_stub(model_cls: type) -> Any:
