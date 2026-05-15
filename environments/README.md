@@ -44,7 +44,7 @@ This folder contains installable example environments that showcase common usage
 
 - **RLMEnv (Recursive Language Model)**
   - **rlm_secrets**: Puzzle environment testing RLM functionality including root-level tools, sub-LLM tool use, and file operations.
-  - **hello_rlm_v1**: v1 sandboxed RLM-style CLI program with endpoint interception and metrics collection.
+  - **hello_rlm_v1**: v1 `vf.RLM` harness example with endpoint interception and metrics collection.
 
 - **V1 Taskset/Harness**
   - **dspy_rlm**: DSPy RLM harness on GSM8K through `vf.Env`; DSPy uses the V1 interception endpoint from rollout state.
@@ -58,7 +58,7 @@ This folder contains installable example environments that showcase common usage
 
 - **Taskset/Harness v1**
   - **bfcl_v3**: BFCL v3 function-calling eval using task-local dynamic tool schemas and v1 rewards.
-  - **dspy_flights**: DSPy flight-support entrypoint configured against the v1 interception endpoint.
+  - **dspy_flights**: Sandboxed DSPy flight-support `program.fn` entrypoint installed from its package `pyproject.toml` and configured against the v1 interception endpoint.
   - **hello_group_reward_v1**: Deterministic v1 reference for group updates, metrics, rewards, advantages, and cleanup.
   - **tau2_bench_v1**: `tau2-bench-v1` τ²-bench taskset/user/tool pattern on the v1 harness runtime.
 

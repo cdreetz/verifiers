@@ -193,6 +193,7 @@ class TrajectoryStepTokens(TypedDict):
     overlong_prompt: bool
     is_truncated: bool
     routed_experts: list[list[list[int]]] | None  # [seq_len, layers, topk] to enable router replay
+    multi_modal_data: NotRequired[Any]  # renderers.MultiModalData sidecar (pixel_values, placeholder ranges) — set only on multimodal rollouts
 ```
 
 Token-level data for training.
@@ -279,6 +280,7 @@ class VersionInfo(TypedDict):
 
 class GenerateMetadata(TypedDict):
     env_id: str
+    name: NotRequired[str]
     env_args: dict
     model: str
     base_url: str
@@ -503,11 +505,11 @@ Persistent Python REPL in sandbox. Extends `SandboxEnv`.
 class OpenEnvEnv(MultiTurnEnv):
     def __init__(
         self,
-        openenv_project: str | Path,
+        openenv_project: str | Path | None = None,
         num_train_examples: int = 100,
         num_eval_examples: int = 50,
         seed: int = 0,
-        prompt_renderer: Callable[..., ChatMessages] | None = None,
+        prompt_renderer: Callable[..., Messages] | None = None,
         max_turns: int = -1,
         rubric: Rubric | None = None,
         **kwargs,
@@ -710,6 +712,12 @@ tool loop.
 | `{"fn": "pkg.module:run", ...}` | Importable Python program. |
 | `{"command": ["cmd", "arg"], ...}` | Local or sandboxed command. |
 
+Sandboxed `program.fn` refs resolve their owning local package from the resolved
+module root: single-file modules use `pyproject.toml` in the same directory as
+the module file, and package modules use `pyproject.toml` inside the package
+directory. v1 uploads and installs that package in the program sandbox. Package
+dependencies come from normal `[project.dependencies]`.
+
 #### Env
 
 ```python
@@ -731,15 +739,13 @@ class Toolset:
         bindings=None,
         objects=None,
         write: bool = False,
-        scope: Literal["rollout", "group", "global"] = "rollout",
+        scope: Literal["rollout", "group", "global"] | None = None,
         sandbox=None,
         stops=(),
         setups=(),
         updates=(),
-        metrics=(),
-        rewards=(),
-        advantages=(),
         cleanups=(),
+        teardowns=(),
         config: ToolsetConfig | Mapping[str, object] | None = None,
     ): ...
 
@@ -747,9 +753,11 @@ class MCPTool:
     def __init__(command: str, args=None, env=None, cwd: str | None = None): ...
 ```
 
-Toolsets package callable tools, MCP servers, private dependency factories, and
-hidden bindings. `objects.*` bindings are private to the owning toolset/user and
-are not directly accessible from state.
+Toolsets package callable tools, MCP servers, private dependency factories,
+hidden bindings, and tool-owned lifecycle handlers. `objects.*` bindings are
+private to the owning toolset/user and are not directly accessible from state.
+String binding sources are framework paths; literal strings should be bound via
+callable sources.
 
 #### v1 Config Models
 
@@ -1002,8 +1010,8 @@ class Config(BaseModel):
     ) -> Self: ...
 
 class EnvConfig(Config):
-    taskset: object | None = None
-    harness: object | None = None
+    taskset: TasksetConfig
+    harness: HarnessConfig
 
 class TasksetConfig(Config):
     taskset_id: str | None = None
@@ -1022,8 +1030,13 @@ class HarnessConfig(Config):
 ```
 
 `EnvConfig` is the typed v1 loader envelope. TOML `[env.taskset]` and
-`[env.harness]` sections flow to `config.taskset` and `config.harness`;
-environment-specific named args flow through `[env.args]`.
+`[env.harness]` sections populate `EnvConfig.taskset` and `EnvConfig.harness`.
+Environment-specific fields belong on the taskset or harness config that owns
+them; `EnvConfig` subclasses only bind concrete child config types.
+`taskset` must be typed as a `TasksetConfig` subclass, and `harness` must be
+typed as a `HarnessConfig` subclass.
+Annotation-only `Config` fields on `Config` subclasses default to their config
+class, so nested config objects do not need `Field(default_factory=...)`.
 
 `Config` subclasses accept a positional source config plus direct keyword
 overrides. The source object is positional-only so subclasses can define a real
@@ -1082,6 +1095,7 @@ Leaf endpoint configuration used inside `ClientConfig.endpoint_configs`. Has the
 ```python
 class EvalConfig(BaseModel):
     env_id: str
+    name: str | None = None
     env_args: dict
     env_dir_path: str
     endpoint_id: str | None = None
