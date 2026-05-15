@@ -26,6 +26,7 @@ from unittest.mock import MagicMock
 
 import httpx
 from httpx import ASGITransport
+from pydantic_core import PydanticUndefined
 
 from verifiers.v1 import Taskset, Toolset
 
@@ -153,6 +154,43 @@ def _completion_to_nemogym_response(
     )
 
 
+def _default_for_annotation(ann: type | None) -> Any:
+    """Produce a zero-value default for a type annotation."""
+    import typing
+
+    if ann is None:
+        return ""
+    if ann is str:
+        return ""
+    if ann is int:
+        return 0
+    if ann is float:
+        return 0.0
+    if ann is bool:
+        return False
+    origin = getattr(ann, "__origin__", None)
+    if origin is list or ann is list:
+        return []
+    if origin is dict or ann is dict:
+        return {}
+    if origin is typing.Literal:
+        args = typing.get_args(ann)
+        return args[0] if args else ""
+    if hasattr(ann, "model_fields"):
+        return _build_pydantic_stub(ann)
+    return MagicMock()
+
+
+def _build_pydantic_stub(model_cls: type) -> Any:
+    """Recursively construct a Pydantic model with zero-value defaults."""
+    kwargs: dict[str, Any] = {}
+    for fname, finfo in model_cls.model_fields.items():
+        if finfo.default is not PydanticUndefined:
+            continue
+        kwargs[fname] = _default_for_annotation(finfo.annotation)
+    return model_cls(**kwargs)
+
+
 def _make_server(server_cls: type, server_config: dict[str, Any] | None = None) -> Any:
     """Instantiate a NeMo Gym server class with minimal config."""
     cfg = server_config or {}
@@ -161,17 +199,19 @@ def _make_server(server_cls: type, server_config: dict[str, Any] | None = None) 
         if field_name == "config" and field_info.annotation is not None:
             config_cls = field_info.annotation
             break
-    config = config_cls(
-        host=cfg.get("host", ""),
-        port=cfg.get("port", 0),
-        entrypoint=cfg.get("entrypoint", ""),
-        name=cfg.get("name", ""),
-        **{
-            k: v
-            for k, v in cfg.items()
-            if k not in ("host", "port", "entrypoint", "name")
-        },
-    )
+
+    base_fields = {"host": "", "port": 0, "entrypoint": "", "name": ""}
+    init_kwargs = {k: cfg.get(k, v) for k, v in base_fields.items()}
+    init_kwargs.update({k: v for k, v in cfg.items() if k not in base_fields})
+
+    for fname, finfo in config_cls.model_fields.items():
+        if fname in init_kwargs:
+            continue
+        if finfo.default is not PydanticUndefined:
+            continue
+        init_kwargs[fname] = _default_for_annotation(finfo.annotation)
+
+    config = config_cls(**init_kwargs)
     return server_cls(config=config, server_client=MagicMock(spec=ServerClient))
 
 
@@ -266,7 +306,9 @@ def _apply_pydantic_signature(
     for fname, finfo in fields.items():
         ann = finfo.annotation if finfo.annotation is not None else str
         default = (
-            finfo.default if finfo.default is not None else inspect.Parameter.empty
+            finfo.default
+            if finfo.default is not PydanticUndefined
+            else inspect.Parameter.empty
         )
         new_params.append(
             inspect.Parameter(
