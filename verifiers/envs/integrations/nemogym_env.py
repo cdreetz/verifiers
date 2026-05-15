@@ -483,17 +483,18 @@ class NemoGymTaskset(Taskset):
             state["prompt"] = [{"role": "user", "content": obs}]
 
     async def _gymnasium_user(
-        self, task: Any, state: Any, transcript: Any = None
+        self, task: Any, state: Any
     ) -> list[dict[str, str]] | None:
         runtime = state.get("runtime", {})
         if runtime.get("nemogym_terminated", False):
             return None
 
         session_id = runtime.get("nemogym_session_id", "")
-        if not transcript:
+        completion = state.get("completion", [])
+        if not completion:
             return None
 
-        last_content = self._last_assistant_content(transcript)
+        last_content = self._last_assistant_content(completion)
         if last_content is None:
             return None
 
