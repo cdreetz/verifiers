@@ -257,6 +257,10 @@ def __getattr__(name: str):
             raise AttributeError(
                 "To use verifiers.RendererClient, install as `verifiers[renderers]`."
             ) from e
+        if name == "NemoGymTaskset":
+            raise AttributeError(
+                "To use verifiers.NemoGymTaskset, install as `verifiers[nemogym]`."
+            ) from e
         raise AttributeError(
             f"To use verifiers.{name}, install as `verifiers[all]`. "
         ) from e

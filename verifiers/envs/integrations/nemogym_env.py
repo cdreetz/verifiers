@@ -514,15 +514,15 @@ class NemoGymTaskset(Taskset):
         cleanups: list[Any] = []
 
         if self._is_agent:
-            rewards.append(self._agent_reward)
+            rewards.append(self.agent_reward)
         elif self._is_gymnasium:
-            rewards.append(self._gymnasium_reward)
-            setups.append(self._gymnasium_setup)
-            stops.append(self._gymnasium_stop)
-            cleanups.append(self._gymnasium_cleanup)
-            kwargs.setdefault("user", self._gymnasium_user)
+            rewards.append(self.gymnasium_reward)
+            setups.append(self.gymnasium_setup)
+            stops.append(self.gymnasium_stop)
+            cleanups.append(self.gymnasium_cleanup)
+            kwargs.setdefault("user", self.gymnasium_user)
         else:
-            rewards.append(self._verify_reward)
+            rewards.append(self.verify_reward)
             tool_routes = _discover_tool_routes(self._app)
             if tool_routes:
                 first_info = (
@@ -550,19 +550,19 @@ class NemoGymTaskset(Taskset):
 
     # -- Gymnasium handlers --
 
-    async def _gymnasium_setup(self, task: Any, state: Any) -> None:
+    async def gymnasium_setup(self, task: Any, state: Any) -> None:
         session_id = uuid.uuid4().hex
         state.setdefault("runtime", {})
         state["runtime"]["nemogym_session_id"] = session_id
         state["runtime"]["nemogym_terminated"] = False
         state["runtime"]["nemogym_reward"] = 0.0
 
-        metadata = self._extract_metadata(task)
+        metadata = self.extract_metadata(task)
         obs, _ = await self._server.reset(metadata, session_id=session_id)
         if obs:
             state["prompt"] = [{"role": "user", "content": obs}]
 
-    async def _gymnasium_user(
+    async def gymnasium_user(
         self, task: Any, state: Any
     ) -> list[dict[str, str]] | None:
         runtime = state.get("runtime", {})
@@ -574,14 +574,14 @@ class NemoGymTaskset(Taskset):
         if not completion:
             return None
 
-        last_content = self._last_assistant_content(completion)
+        last_content = self.last_assistant_content(completion)
         if last_content is None:
             return None
 
         response = _completion_to_nemogym_response(
             [{"role": "assistant", "content": last_content}]
         )
-        metadata = self._extract_metadata(task)
+        metadata = self.extract_metadata(task)
         obs, reward, terminated, truncated, _ = await self._server.step(
             response, metadata, session_id=session_id
         )
@@ -595,24 +595,24 @@ class NemoGymTaskset(Taskset):
             return [{"role": "user", "content": obs}]
         return None
 
-    async def _gymnasium_stop(self, task: Any, state: Any) -> bool:
+    async def gymnasium_stop(self, task: Any, state: Any) -> bool:
         runtime = state.get("runtime", {})
         if runtime.get("nemogym_terminated", False):
             return True
         turn = state.get("turn", 0)
         return turn >= self._max_steps
 
-    async def _gymnasium_reward(self, task: Any, state: Any) -> float:
+    async def gymnasium_reward(self, task: Any, state: Any) -> float:
         return float(state.get("runtime", {}).get("nemogym_reward", 0.0))
 
-    async def _gymnasium_cleanup(self, task: Any, state: Any) -> None:
+    async def gymnasium_cleanup(self, task: Any, state: Any) -> None:
         session_id = state.get("runtime", {}).get("nemogym_session_id")
         if session_id and hasattr(self._server, "close_session"):
             await self._server.close_session(session_id)
 
     # -- SimpleResourcesServer reward --
 
-    async def _verify_reward(self, task: Any, state: Any) -> float:
+    async def verify_reward(self, task: Any, state: Any) -> float:
         completion = state.get("completion", [])
         if not completion:
             return 0.0
@@ -644,16 +644,13 @@ class NemoGymTaskset(Taskset):
             if resp.status_code == 200:
                 result = resp.json()
                 return float(result.get("reward", 0.0))
-            logger.warning(
-                "verify returned status %d: %s",
-                resp.status_code,
-                resp.text[:200],
+            raise RuntimeError(
+                f"verify endpoint returned status {resp.status_code}: {resp.text[:200]}"
             )
-            return 0.0
 
     # -- Agent reward --
 
-    async def _agent_reward(self, task: Any, state: Any) -> float:
+    async def agent_reward(self, task: Any, state: Any) -> float:
         completion = state.get("completion", [])
         if not completion:
             return 0.0
@@ -682,17 +679,15 @@ class NemoGymTaskset(Taskset):
             if resp.status_code == 200:
                 result = resp.json()
                 return float(result.get("reward", 0.0))
-            logger.warning(
-                "agent /run returned status %d: %s",
-                resp.status_code,
-                resp.text[:200],
+            raise RuntimeError(
+                f"agent /run endpoint returned status {resp.status_code}: "
+                f"{resp.text[:200]}"
             )
-            return 0.0
 
     # -- Helpers --
 
     @staticmethod
-    def _extract_metadata(task: Any) -> dict[str, Any]:
+    def extract_metadata(task: Any) -> dict[str, Any]:
         info_str = task.get("info")
         if not info_str:
             return {}
@@ -701,7 +696,7 @@ class NemoGymTaskset(Taskset):
         return {k: v for k, v in rcp.items() if k != "input"}
 
     @staticmethod
-    def _last_assistant_content(transcript: Any) -> str | None:
+    def last_assistant_content(transcript: Any) -> str | None:
         for msg in reversed(transcript):
             role = (
                 msg.get("role", "")
