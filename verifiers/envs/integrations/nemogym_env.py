@@ -572,7 +572,7 @@ class NemoGymTaskset(Taskset):
     async def gymnasium_user(
         self, task: Any, state: Any
     ) -> list[dict[str, str]] | None:
-        runtime = state.get("runtime", {})
+        runtime = state["runtime"]
         if runtime.get("nemogym_terminated", False):
             return None
 
@@ -603,17 +603,17 @@ class NemoGymTaskset(Taskset):
         return None
 
     async def gymnasium_stop(self, task: Any, state: Any) -> bool:
-        runtime = state.get("runtime", {})
+        runtime = state["runtime"]
         if runtime.get("nemogym_terminated", False):
             return True
         turn = state.get("turn", 0)
         return turn >= self._max_steps
 
     async def gymnasium_reward(self, task: Any, state: Any) -> float:
-        return float(state.get("runtime", {}).get("nemogym_reward", 0.0))
+        return float(state["runtime"].get("nemogym_reward", 0.0))
 
     async def gymnasium_cleanup(self, task: Any, state: Any) -> None:
-        session_id = state.get("runtime", {}).get("nemogym_session_id")
+        session_id = state["runtime"].get("nemogym_session_id")
         if session_id and hasattr(self._server, "close_session"):
             await self._server.close_session(session_id)
 
