@@ -655,6 +655,8 @@ class NemoGymTaskset(Taskset):
         if not completion:
             return 0.0
 
+        response = _completion_to_nemogym_response(completion)
+
         info_str = task.get("info")
         info = json.loads(info_str) if isinstance(info_str, str) else (info_str or {})
         raw_row = info.get("raw_row", {})
@@ -666,9 +668,10 @@ class NemoGymTaskset(Taskset):
 
         run_body: dict[str, Any] = {
             "responses_create_params": rcp_obj.model_dump(),
+            "response": response.model_dump(),
         }
         for k, v in raw_row.items():
-            if k != "responses_create_params":
+            if k not in ("responses_create_params", "response"):
                 run_body[k] = v
 
         transport = ASGITransport(app=self._app)  # type: ignore[arg-type]
