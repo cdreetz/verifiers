@@ -188,7 +188,7 @@ def _build_pydantic_stub(model_cls: type) -> Any:
     """Recursively construct a Pydantic model with zero-value defaults."""
     kwargs: dict[str, Any] = {}
     for fname, finfo in model_cls.model_fields.items():
-        if finfo.default is not PydanticUndefined:
+        if not finfo.is_required():
             continue
         kwargs[fname] = _default_for_annotation(finfo.annotation)
     return model_cls(**kwargs)
@@ -210,7 +210,7 @@ def _make_server(server_cls: type, server_config: dict[str, Any] | None = None) 
     for fname, finfo in config_cls.model_fields.items():
         if fname in init_kwargs:
             continue
-        if finfo.default is not PydanticUndefined:
+        if not finfo.is_required():
             continue
         init_kwargs[fname] = _default_for_annotation(finfo.annotation)
 
