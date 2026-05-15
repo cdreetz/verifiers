@@ -552,7 +552,7 @@ class NemoGymTaskset(Taskset):
         if raw_idx < len(self._raw_rows):
             raw_row = self._raw_rows[raw_idx]
             for k, v in raw_row.items():
-                if k not in ("responses_create_params", "agent_ref"):
+                if k not in ("responses_create_params", "agent_ref", "response"):
                     verify_body[k] = v
 
         transport = ASGITransport(app=self._app)  # type: ignore[arg-type]
