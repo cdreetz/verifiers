@@ -141,13 +141,20 @@ def _extract_user_messages(
 
 
 def _completion_to_nemogym_response(
-    completion: list[dict[str, Any]],
+    completion: list[Any],
 ) -> NeMoGymResponse:
-    """Convert a verifiers completion (list of message dicts) to NeMoGymResponse."""
+    """Convert a verifiers completion (list of Message objects or dicts) to NeMoGymResponse."""
     text_parts: list[str] = []
     for msg in completion:
-        if msg.get("role") == "assistant":
-            content = msg.get("content", "")
+        role = (
+            msg.get("role", "") if isinstance(msg, dict) else getattr(msg, "role", "")
+        )
+        if role == "assistant":
+            content = (
+                msg.get("content", "")
+                if isinstance(msg, dict)
+                else getattr(msg, "content", "")
+            )
             if isinstance(content, str) and content:
                 text_parts.append(content)
 
